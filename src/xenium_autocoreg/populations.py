@@ -2,21 +2,17 @@
 comparable population per section.
 
 Xenium population priority:
-  1. reporter+ (EGFP+SYFP2 transcript count >= min_count) from the raw processed Xenium zarr --
-     the validated population (see the coreg-population-choice project memory). Used whenever
-     `cfg.reporter_zarr_root` is available.
-  2. ALL segmented Xenium cells -- the fallback when no zarr is mounted (most new subjects). This
-     is a reasonable substitute, not a hack: on 816462, reporter+ at the validated min_count=2
-     threshold already kept ~94% of all cells (19522/20696) -- the reporter filter was barely
-     selective at that threshold, so using everyone changes the effective population very little.
+  1. reporter+ (transcript count >= min_count for the configured reporter genes) from the raw
+     processed Xenium zarr, when `cfg.reporter_zarr_root` is available.
+  2. ALL segmented Xenium cells -- the fallback when no reporter source is mounted. This is a
+     reasonable substitute, not a hack: at a modest min_count threshold the reporter filter tends
+     to be only mildly selective, so using everyone changes the effective population little.
 """
 import glob
 import numpy as np
 import tifffile as tiff
 import zarr
 import scipy.sparse as ssp
-
-from . import XENIUM_S2_UM
 
 REPORTER_GENES = ["EGFP", "SYFP2", "pHaloTag-EGFP"]
 
@@ -43,9 +39,8 @@ def centroids_3d(masks):
 
 
 def load_zstack_cells(cfg):
-    """(ids, xy_um, plane) for every segmented z-stack cell. xy in the z-stack's own (x,y) frame.
-    Uses cfg.zstack_xy_um (per-subject -- NOT always 700/512, see config.py) rather than the
-    global ZSTACK_XY_UM constant."""
+    """(ids, xy_um, plane) for every segmented z-stack cell. xy in the z-stack's own (x,y) frame,
+    converted to microns via this acquisition's own `cfg.zstack_xy_um`."""
     seg = tiff.imread(cfg.zstack_segmented_tif)
     ids, czyx = centroids_3d(seg)
     xy_um = czyx[:, 1:][:, ::-1] * cfg.zstack_xy_um
@@ -92,5 +87,5 @@ def load_xenium_cells(cfg, sec, aligned=True, min_count=2):
         keep = np.array([rep.get(int(i), 0) >= min_count for i in ids])
         used_reporter = True
 
-    xy_um = cyx[keep][:, ::-1] * XENIUM_S2_UM
+    xy_um = cyx[keep][:, ::-1] * cfg.xenium_xy_um
     return ids[keep], xy_um, used_reporter, len(ids)

@@ -1,11 +1,8 @@
 """
 Fine registration: fine mask-based tile correlation -> TPS control points -> warp -> the
-probability-filtered cell-matching metric. This is the canonical, validated replacement for the
-older `fine_register.py`/`propagate_format._format_one` path (now in `archive/`), which had two
-real gaps: it fit the TPS from the *coarse* intensity tile pass instead of a *fine* mask-based one,
-and it never ran the probability-matching step at all. Ported from
-`s09_tilt_refinement_final/final_protocol.py`'s Phase 2/3 and `s11_new_subjects/
-run_all_subjects.py`'s `materialize_section`, generalized across subjects.
+probability-filtered cell-matching metric. This supersedes the coarser approach in `archive/
+fine_register_old.py`, which fit the TPS from a coarse intensity tile pass instead of a fine
+mask-based one, and never ran the probability-matching step at all.
 
 Produces, per section, the full canonical output layout under `out_dir`:
     Affine matrices/section_N_{affine_matrix,rotation_3d}.npy

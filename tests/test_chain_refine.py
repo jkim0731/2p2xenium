@@ -3,8 +3,8 @@ from xenium_autocoreg.chain_refine import clip_affine_scale, SCALE_CLIP
 
 
 def test_clip_affine_scale_bounds_a_distorted_candidate():
-    """The exact bug class found on 827543 / 816462 section 17: a weak-signal fit can produce a
-    wildly anisotropic scale (e.g. 0.94 / 0.55) that should never survive uncorrected."""
+    """A weak-signal fit can produce a wildly anisotropic scale (e.g. 0.94 / 0.55) that should
+    never survive uncorrected."""
     M = np.eye(3)
     M[:2, :2] = np.diag([0.94, 0.55])   # anisotropic, one axis far outside the physical prior
     clipped = clip_affine_scale(M)

@@ -12,7 +12,8 @@ Usage:
     xenium-autocoreg <subject_id> <out_dir> --pose-mode corners --pose-json seed.json   # NOT YET IMPLEMENTED
 
 `--pose-json PATH` is an alternative to inline flags for mode 2/3, pointing at a JSON file:
-    {"center_um": [x, y], "rotation_deg": r, "scale": 0.80}                       (mode 2)
+    {"center_um": [x, y], "rotation_deg": r, "scale": 0.8}   (mode 2; "scale" optional --
+    defaults to the subject's own SubjectConfig.tissue_expansion_scale if omitted)
     {"xenium_trapezoid_corners_um": [[x,y],[x,y],[x,y],[x,y]], "top_edge": 0}      (mode 3, TODO)
 """
 from __future__ import annotations
@@ -63,7 +64,7 @@ def write_cell_centroids(cfg, out_dir, sections, max_workers=14):
 
 
 def run_subject(subject_id, out_dir, pose_mode="auto", anchor_sec=None, center_um=None,
-                rotation_deg=None, scale=0.80, verbose=True):
+                rotation_deg=None, scale=None, verbose=True):
     def log(msg):
         if verbose:
             print(msg, flush=True)
@@ -77,7 +78,7 @@ def run_subject(subject_id, out_dir, pose_mode="auto", anchor_sec=None, center_u
     if pose_mode == "auto":
         seed_result = ps.seed_from_auto_search(cfg, anchor_sec, verbose=verbose)
     elif pose_mode == "center-rotation":
-        seed = ps.seed_from_center_rotation(center_um, rotation_deg, scale)
+        seed = ps.seed_from_center_rotation(center_um, rotation_deg, scale, cfg=cfg)
         seed_result = ps.refine_from_seed(cfg, anchor_sec, seed, verbose=verbose)
     elif pose_mode == "corners":
         raise NotImplementedError("pose-mode 'corners' is not yet implemented -- see pose_seed.seed_from_corners")
@@ -137,7 +138,8 @@ def main(argv=None):
     p.add_argument("--anchor-sec", type=int, default=None)
     p.add_argument("--center-um", default=None, help="X,Y (comma-separated) for --pose-mode center-rotation")
     p.add_argument("--rotation-deg", type=float, default=None)
-    p.add_argument("--scale", type=float, default=0.80)
+    p.add_argument("--scale", type=float, default=None,
+                  help="Xenium-to-z-stack scale prior; defaults to the subject's own config value if omitted")
     p.add_argument("--pose-json", default=None, help="JSON file alternative to the inline flags above")
     args = p.parse_args(argv)
 

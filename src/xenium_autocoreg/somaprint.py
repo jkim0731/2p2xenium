@@ -217,13 +217,13 @@ def quality(result, cz_xy0, xen_xy, seed):
     return dict(n=len(acc), spread=spread, loo_um=loo_um, score=float(len(acc)))
 
 
-# ───────── whole-FOV expansion (validated: 20% → whole FOV at 100% precision) ─────────
+# ───────── whole-FOV expansion ─────────
 def expand_by_affine_nn(anchors, cz_xy, xen_xy, nn_radius_um=12.0, flow_tol_um=30.0):
-    """Expand a clustered set of reliable anchors to the WHOLE FOV. The soma-print matcher only fires
-    where the local pattern is distinctive (~20% of the FOV), but those anchors determine a globally
-    accurate 2D affine (~1.5 µm vs GT on 816462 sec9). So: fit a global affine from the anchors, then
-    assign every CZ cell to its nearest Xenium cell within `nn_radius_um` of its affine-predicted
-    position, and apply the local optical-flow filter. → ~97% recall at 100% precision, whole FOV.
+    """Expand a clustered set of reliable anchors to the WHOLE FOV. The soma-print matcher only
+    fires where the local pattern is distinctive (a minority of the FOV), but those anchors
+    determine a globally accurate 2D affine. So: fit a global affine from the anchors, then assign
+    every CZ cell to its nearest Xenium cell within `nn_radius_um` of its affine-predicted
+    position, and apply the local optical-flow filter.
 
     anchors : (K,2) [cz_idx, xen_idx]   cz_xy : (N,2) µm (CZ slab, ORIGINAL frame)   xen_xy : (M,2) µm
     Returns (P,2) [cz_idx, xen_idx] expanded matches, and the 3x3 affine (CZ→Xenium)."""

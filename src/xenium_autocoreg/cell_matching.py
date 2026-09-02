@@ -1,7 +1,7 @@
-"""Statistical cell matching -- ported from capsule-8426189-coregistration+codes/
-cell_matching_probability.ipynb cell 2 (kNN spatial-shift null model -> Mahalanobis + empirical
-p-values on IoU vs a random-shift background), plus its cell-5 QC figure, transcribed as-is so the
-output format (columns, npz keys, PNG layout) matches the reference asset exactly."""
+"""Statistical cell matching: a kNN spatial-shift null model -> Mahalanobis distance -> empirical
+p-value on IoU vs. a random-shift background, plus its QC figure. A match is `valid` only when
+both the raw IoU and the empirical p-value clear their thresholds -- this rejects incidental
+overlaps that a plain IoU cutoff alone would accept."""
 import numpy as np
 import pandas as pd
 import tifffile as tiff

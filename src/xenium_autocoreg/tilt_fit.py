@@ -1,27 +1,23 @@
 """
-General 3D-tilt-fitting stage, generalizing the validated procedure from
-`s09_tilt_refinement_final/final_protocol.py`'s Phase 1 (SLAB_HALF=30, ACCUMULATE landmarks across
-rounds with a bijective constraint, iterate until a round finds no new landmarks) into a function
-any subject can call, seeded from an ALREADY-FOUND pose rather than re-running the expensive blind
-grid search.
-
-This supersedes `initial_match.search_anchor_section`'s own embedded tilt loop for quality (that
-one uses the stale SLAB_HALF=20 and REPLACES rather than accumulates each round's landmark set --
-see that function's docstring / s09_tilt_refinement_final/SUMMARY.md's "What was and wasn't
-changed" section for the exact gap) -- but does NOT replace `search_anchor_section` itself, which
-still does the real work of finding the pose in the first place. Call `fit_tilt_and_landmarks`
-AFTER you already have a validated (M3, plane) from either the automatic grid search or a
-human-provided seed.
+3D-tilt-fitting stage: given an already-found rough pose (from either pose-seeding mode),
+iteratively matches landmarks, accumulates them (bijective -- no z-stack or Xenium cell reused
+across landmarks), fits a 3D tilt correction from the full accumulated set, de-tilts the z-stack
+population, and repeats until a round finds no new landmarks. This is a *slower but more thorough*
+alternative to `initial_match.search_anchor_section`'s own embedded tilt loop (which uses a
+narrower slab and replaces rather than accumulates each round's landmark set) -- it does NOT
+replace `search_anchor_section` itself, which does the actual pose search. Call
+`fit_tilt_and_landmarks` after you already have a validated (M3, plane) from either pose-seeding
+mode.
 """
 import numpy as np
-import tifffile as tiff
-from . import somaprint as sp2, bigwarp, ZSTACK_XY_UM, XENIUM_S2_UM
+from . import somaprint as sp2, bigwarp
 from .geometry import find_affine_transformation_2d
 from .populations import load_zstack_cells, load_xenium_cells
 from .reference_ported import find_min_z_spread_rotation
 from .initial_match import make_seed, _aff, K, N_BEST
 
-SLAB_HALF = 30   # validated value (60um-thick slab) -- NOT initial_match.SLAB_HALF (20, stale)
+SLAB_HALF = 30   # slab half-thickness in z-stack planes (60um-thick slab at 1um/plane) -- wider
+                 # than initial_match.SLAB_HALF's search-time default, for a more thorough fit
 P = np.array([[0, 0, 1], [0, 1, 0], [1, 0, 0]], float)   # xyz<->zyx permutation
 
 
@@ -45,8 +41,7 @@ def fit_tilt_and_landmarks(cfg, sec, seed_M3, seed_plane, max_rounds=12, verbose
     ids_x, xen_xy, used_rep, n_total = load_xenium_cells(cfg, sec, aligned=True, min_count=2)
     id_to_idx_cz = {int(i): k for k, i in enumerate(ids_cz)}
 
-    zstack_shape = tiff.imread(cfg.zstack_segmented_tif).shape
-    center = np.array(zstack_shape) / 2.0
+    center = np.array(cfg.zstack_shape_px) / 2.0
     cz_px = cz_xy_um / cfg.zstack_xy_um
     pts_zyx_orig_all = np.column_stack([cz_pl, cz_px[:, 1], cz_px[:, 0]])
 
@@ -73,7 +68,7 @@ def fit_tilt_and_landmarks(cfg, sec, seed_M3, seed_plane, max_rounds=12, verbose
             p = np.atleast_2d(p) / um_per_px
             rc = np.column_stack([p[:, 1], p[:, 0], np.ones(len(p))])
             xen_rc = (M_inv @ rc.T).T[:, :2]
-            return xen_rc[:, ::-1] * XENIUM_S2_UM
+            return xen_rc[:, ::-1] * cfg.xenium_xy_um
 
         r = sp2.match(slab, xen_xy, seed_fn, R_cand=30.0, n_best=N_BEST, anchor_frac=0.8, k_cz=K, k_xen=K, max_rounds=3)
         cert = r["accepted"]
@@ -101,7 +96,7 @@ def fit_tilt_and_landmarks(cfg, sec, seed_M3, seed_plane, max_rounds=12, verbose
         idx_cz = np.array([id_to_idx_cz[z] for z in L_cz_ids])
         moving_raw = np.column_stack([cz_xy_um[idx_cz] / cfg.zstack_xy_um, cz_pl[idx_cz]])
         idx_xen = np.array([np.flatnonzero(ids_x == x)[0] for x in L_xen_ids])
-        fixed_aligned = np.column_stack([xen_xy[idx_xen] / XENIUM_S2_UM, np.zeros(len(idx_xen))])
+        fixed_aligned = np.column_stack([xen_xy[idx_xen] / cfg.xenium_xy_um, np.zeros(len(idx_xen))])
         R_3d, _ = find_min_z_spread_rotation(moving_raw)
 
         R_vol = P @ R_3d @ P

@@ -1,14 +1,9 @@
-"""Chained cross-section propagation -- the REAL algorithm from
-capsule-8111671-coregistration-codes/xenium_automatic_coreg.ipynb cell 8 (NOT a same-affine reuse,
-NOT ICP -- see the coreg-aligned-native-pipeline project memory for why those two are wrong).
-
-For each section, sequentially: seed from the PREVIOUS section's converged affine (+/- Z_STEP to
-z_base), then iteratively refine M by tile-based image correlation against the raw z-stack volume,
-composing a correction affine each round until correlation quality stops improving. Includes the
-capsule-8426189 fix (not present in capsule-8111671): clip each iteration's correction to +/-5%
-scale via SVD, and use a dynamic/stricter tile-correlation threshold -- without this, a
-weak-signal section can drift into an unphysical anisotropic-scale affine that then propagates to
-every section downstream (found and fixed on 816462 section 17, see SUMMARY.md history)."""
+"""Chained cross-section propagation: for each section, sequentially, seed from the PREVIOUS
+section's own converged affine (offsetting z_base by the estimated per-section plane step), then
+iteratively refine the affine by tile-based image correlation against the z-stack volume, composing
+a correction affine each round until correlation quality stops improving, with each candidate
+correction's scale clipped via SVD -- without this, a weak-signal section can drift into an
+unphysical anisotropic-scale affine that then propagates to every section downstream."""
 import json
 import numpy as np
 import tifffile as tiff
@@ -24,10 +19,10 @@ SCALE_CLIP = (0.95, 1.05)
 
 
 def clip_affine_scale(M, lo=SCALE_CLIP[0], hi=SCALE_CLIP[1]):
-    """The capsule-8426189 fix: clip a candidate affine's 2x2 linear block to +/-5% scale via SVD,
-    preserving its rotation/shear. Without this, a weak-signal section can drift into an
-    unphysical anisotropic-scale affine that then propagates to every section downstream (found
-    and fixed on 816462 section 17 / 827543). Operates on a copy; does not mutate `M`."""
+    """Clip a candidate affine's 2x2 linear block to +/-5% scale via SVD, preserving its
+    rotation/shear. Without this, a weak-signal section can drift into an unphysical
+    anisotropic-scale affine that then propagates to every section downstream. Operates on a
+    copy; does not mutate `M`."""
     M = M.copy()
     U, S, Vt = np.linalg.svd(M[:2, :2])
     S_clipped = np.clip(S, lo, hi)
@@ -109,12 +104,11 @@ def run_chain(cfg, anchor_sec, anchor_M, anchor_z, out_dir, sections=None, R_3d=
     for step_sign, seq in ((+1, forward), (-1, backward)):
         M_cur, z_cur, prev_sec = M, z_base, anchor_sec
         # Per-section plane step, re-estimated as a running mean of observed |Δz_base|/|Δsection|
-        # across already-converged steps in THIS direction -- starts at Z_STEP (the old fixed
+        # across already-converged steps in THIS direction -- starts at Z_STEP (a starting
         # assumption) before any real data exists. A gap in the actual Xenium section numbers
-        # (e.g. section 10 -> 15, common when some sections are missing/unusable for a subject)
-        # is scaled by that many section-steps, instead of being treated as a single normal
-        # +/-Z_STEP hop -- fixes a real bug: 827543 has a 4-section gap (11-14 missing) and was
-        # being seeded for section 15 as if it were immediately adjacent to section 10.
+        # (some subjects are missing sections) is scaled by that many section-steps, instead of
+        # being treated as a single normal +/-Z_STEP hop, which would badly under/overshoot the
+        # seed for the section right after a gap.
         step_sum, step_n = float(Z_STEP), 1
         for sec in seq:
             n_gap = abs(sec - prev_sec)

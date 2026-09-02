@@ -1,11 +1,9 @@
-"""Functions ported verbatim (or with light, noted adaptation) from
-`code/capsule-8426189-coregistration+codes/alignment_fucntions.py`, so that this package is
-self-contained (no sys.path reach into a sibling capsule) and can be extracted into its own repo.
-Kept here rather than re-derived so the propagation/cell-matching/3D-mapping stages this package
-adds are byte-for-byte faithful to the reference pipeline's algorithms, not an approximation of them.
+"""3D geometry and tile-correlation helpers used throughout the pipeline: fitting/undoing the
+z-stack tilt, mapping 2D Xenium points into the original 3D z-stack volume, mask-matching IoU, and
+centroid utilities.
 
-`find_affine_transformation_2d` / `apply_affine_based_on_reference_2d` are NOT duplicated here --
-`coreg.geometry`'s versions are already exact equivalents (verified by direct comparison)."""
+`find_affine_transformation_2d` / `apply_affine_based_on_reference_2d` live in `geometry.py`, not
+here."""
 import numpy as np
 from scipy import sparse
 from scipy.signal import fftconvolve

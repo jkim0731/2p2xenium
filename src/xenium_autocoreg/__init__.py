@@ -1,11 +1,14 @@
 """xenium_autocoreg -- GT-free coregistration of an in-vivo 2-photon z-stack to Xenium spatial
 transcriptomics sections. See the top-level README for the process, required input data, and
 output structure.
-"""
-XENIUM_S2_UM = 0.2125 * 3.9996   # morphology_focus/s2 pixel size
-ZSTACK_XY_UM = 700.0 / 512.0     # 700 um FOV / 512 px (subject-specific override: SubjectConfig.zstack_xy_um)
-Z_STEP_UM = 1.0
-SURFACE_PLANE = 50               # pia convention
 
-__all__ = ["XENIUM_S2_UM", "ZSTACK_XY_UM", "Z_STEP_UM", "SURFACE_PLANE"]
+Default acquisition parameters -- starting points only, every one is overridable per subject via
+`SubjectConfig` (see config.py). Nothing in the algorithm assumes these values.
+"""
+DEFAULT_XENIUM_PX_UM = 0.2125 * 3.9996   # Xenium morphology-image pixel size (um/px)
+DEFAULT_Z_STEP_UM = 1.0                  # z-stack native axial resolution (um/plane)
+DEFAULT_TISSUE_EXPANSION_SCALE = 0.80    # Xenium-tissue-to-z-stack linear scale prior (processing
+                                          # shrink/expansion between the two modalities)
+
+__all__ = ["DEFAULT_XENIUM_PX_UM", "DEFAULT_Z_STEP_UM", "DEFAULT_TISSUE_EXPANSION_SCALE"]
 __version__ = "0.1.0"

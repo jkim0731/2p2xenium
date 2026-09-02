@@ -1,26 +1,27 @@
-"""Per-subject path resolution for the automatic z-stack <-> Xenium coregistration pipeline.
+"""Per-subject configuration for the coregistration pipeline.
 
-Generalizes the subject-specific hardcoded paths used during development (816462) to any subject
-that has: (1) a `Xenium-ophys-coregistered_{subject}_*` aligned-frame Xenium directory (produced by
-`interactive_section_alignment.py` / `prepare_data_and_align.py` -- provides *_aligned.tif and
-confirmed_section_transforms.json), and (2) an `ophys-z-stacks_{subject}_segmented*` asset (hard
-requirement -- provides both the segmentation and, via `zstack_data.tif`, the raw intensity volume
-if no separate `_registered*` asset is mounted; the two are verified bit-identical on 827543, so
-`_registered*` is a nice-to-have, not a second hard requirement).
+`SubjectConfig` is a plain dataclass -- construct it directly with your own paths and acquisition
+parameters for any data layout. `resolve_subject` is an OPTIONAL convenience resolver for one
+specific lab's asset-naming convention (see its own docstring); it is not part of the required
+interface and can be skipped entirely if you build `SubjectConfig` yourself.
 
-Manual ground truth (`Xenium_ophys_{subject}_coregistered/`) and the raw processed Xenium zarr
-(`Xenium_{subject}_*_processed/`, for reporter transcript counts) are OPTIONAL -- most subjects run
-through this pipeline won't have either. When the zarr is missing, `populations.py` falls back to
-using all segmented Xenium cells (see its docstring for why that's a reasonable substitute, not a
-hack: reporter+ at the validated min_count=2 threshold already captures ~94% of all cells on 816462).
+A subject needs, at minimum: an "aligned frame" Xenium directory (each section already
+section-to-section aligned, providing `Xenium_images/section_N_Neurons_aligned.tif` and
+`Xenium_segmentation_masks/section_N_Masks_aligned.tif`) and a registered + segmented z-stack
+volume pair (same shape, same physical field of view). A reporter-transcript population source is
+optional; without one the pipeline falls back to using every segmented Xenium cell.
 """
 import glob
+import json
 import numpy as np
-from dataclasses import dataclass
+import os
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-DATA_ROOT = Path("/data")
+from . import DEFAULT_XENIUM_PX_UM, DEFAULT_Z_STEP_UM, DEFAULT_TISSUE_EXPANSION_SCALE
+
+DATA_ROOT = Path(os.environ.get("XENIUM_AUTOCOREG_DATA_ROOT", "/data"))
 
 
 def _latest_glob(pattern: str) -> Optional[str]:
@@ -31,15 +32,40 @@ def _latest_glob(pattern: str) -> Optional[str]:
 @dataclass
 class SubjectConfig:
     subject_id: int
-    aligned_dir: Path                    # Xenium-ophys-coregistered_{sub}_*/  (images, masks, transforms)
-    zstack_registered_tif: Path          # raw intensity volume, (Z,512,512), the 700x700-GCaMP stack
-    zstack_segmented_tif: Path           # matching segmentation label volume
-    reporter_zarr_root: Optional[Path]   # Xenium_{sub}_*_processed/  (None -> fall back to all-cells)
-    manual_gt_dir: Optional[Path]        # Xenium_ophys_{sub}_coregistered/  (None -> no GT comparison)
-    zstack_xy_um: float                  # per-subject z-stack um/px -- NOT always 700/512 (833855's
-                                          # `multiplane-ophys` asset is a genuinely smaller 512x512um
-                                          # FOV at the same 512x512px, i.e. 1.0um/px, not 1.367um/px;
-                                          # verified via roi_groups_metadata.json's sizeXY*objectiveResolution)
+    aligned_dir: Path                    # aligned-frame Xenium directory (images, masks, transforms)
+    zstack_registered_tif: Path          # raw intensity volume, (Z, H, W)
+    zstack_segmented_tif: Path           # matching segmentation label volume, same shape
+    zstack_xy_um: float                  # this z-stack's lateral pixel size (um/px) -- always read
+                                          # from the acquisition's own metadata; never assume a
+                                          # fixed value, different acquisitions can differ
+    reporter_zarr_root: Optional[Path] = None    # optional reporter-transcript population source;
+                                                  # None -> fall back to all segmented cells
+    z_step_um: float = DEFAULT_Z_STEP_UM             # z-stack axial resolution (um/plane)
+    tissue_expansion_scale: float = DEFAULT_TISSUE_EXPANSION_SCALE  # linear scale prior between
+                                                                    # the two modalities (see README)
+    xenium_xy_um: float = DEFAULT_XENIUM_PX_UM       # Xenium morphology-image pixel size (um/px)
+    section_spacing_um: Optional[float] = None       # nominal physical spacing between consecutive
+                                                      # Xenium sections, if known -- purely informational
+                                                      # (the pipeline estimates the real per-section
+                                                      # plane step empirically as it propagates; this
+                                                      # is not required for that estimate to work)
+    _zstack_shape_px: Optional[tuple] = field(default=None, repr=False, compare=False)
+
+    @property
+    def zstack_shape_px(self):
+        """(Z, H, W) of the z-stack volume, read once from the segmentation file's header (no
+        pixel data loaded) rather than assumed."""
+        if self._zstack_shape_px is None:
+            import tifffile as tiff
+            with tiff.TiffFile(self.zstack_segmented_tif) as tf:
+                self._zstack_shape_px = (len(tf.pages),) + tf.pages[0].shape
+        return self._zstack_shape_px
+
+    @property
+    def zstack_fov_um(self):
+        """Physical (H, W) field of view of the z-stack, in microns."""
+        _, h, w = self.zstack_shape_px
+        return (h * self.zstack_xy_um, w * self.zstack_xy_um)
 
     @property
     def sections(self):
@@ -54,13 +80,16 @@ class SubjectConfig:
         return sorted(secs)
 
 
-def _700x700_stacks(root):
-    """All 700x700 acquisitions, GCaMP-only AND GCaMP+Dextran -- channel_0_ref_0 is the GCaMP
-    channel in either case (verified for 816462: corr 0.47 vs 0.07 against a known GCaMP-only
-    reference at the same plane, and visually round nuclei vs. vasculature), so a Dextran-paired
-    acquisition is not excluded, just compared on equal footing via its own channel_0."""
+# ---------------------------------------------------------------------------------------------
+# Below: an OPTIONAL resolver for one lab's specific Code-Ocean-style data-asset naming
+# convention. If your data isn't laid out this way, ignore this section entirely and construct
+# `SubjectConfig` yourself.
+# ---------------------------------------------------------------------------------------------
+
+def _candidate_stacks(root, fov_tag=None):
+    """Subdirectories of `root`, optionally filtered to ones whose name contains `fov_tag`."""
     stacks = [p for p in glob.glob(f"{root}/*") if Path(p).is_dir()]
-    return sorted(s for s in stacks if "700x700" in s)
+    return sorted(s for s in stacks if fov_tag is None or fov_tag in s)
 
 
 def _n_rois(seg_tif_path):
@@ -68,11 +97,9 @@ def _n_rois(seg_tif_path):
     return int(np.unique(tiff.imread(seg_tif_path)).size) - 1   # exclude background (0)
 
 
-def _zstack_xy_um_from_roi_metadata(roi_metadata_path):
+def _zstack_xy_um_from_roi_metadata(roi_metadata_path, objective_resolution=157.0):
     """um/px from a ScanImage roi_groups_metadata.json: FOV_um = sizeXY[0] * objectiveResolution,
-    so um/px = FOV_um / pixelResolutionXY[0]. Verified against the known 700um/400um stacks (both
-    give objectiveResolution=157, and sizeXY*157 reproduces 700.0/400.0 exactly)."""
-    import json
+    so um/px = FOV_um / pixelResolutionXY[0]."""
     d = json.load(open(roi_metadata_path))
     imaging_group = d["RoiGroups"]["imagingRoiGroup"] if "RoiGroups" in d else d["imagingRoiGroup"]
     roi = imaging_group["rois"]
@@ -81,24 +108,17 @@ def _zstack_xy_um_from_roi_metadata(roi_metadata_path):
     sf = sf[0] if isinstance(sf, list) else sf
     size_x = sf["sizeXY"][0]
     px_x = sf["pixelResolutionXY"][0]
-    obj_res = 157.0  # SI.objectiveResolution -- constant across every acquisition checked so far
-    return size_x * obj_res / px_x
+    return size_x * objective_resolution / px_x
 
 
-def _find_zstack_pair_multiplane(subject_id: int):
-    """Fallback for the newer `multiplane-ophys_{subject}_..._cortical-zstack-*` asset naming
-    (e.g. 833855) -- a different convention from `ophys-z-stacks_{subject}_segmented*`, AND
-    sometimes a genuinely different physical FOV (833855 originally only had a 512x512um asset,
-    not the standard 700x700um -- since resolved by a proper 700x700 acquisition, but this still
-    prefers "700x700" in the path when more than one multiplane asset is mounted, matching the
-    `_700x700_stacks` convention used for the older naming, rather than relying on sort order),
-    so the um/px scale must always be read from this stack's own metadata, never assumed to be
-    the global 700/512 default."""
-    seg_dirs = sorted(glob.glob(str(DATA_ROOT / f"multiplane-ophys_{subject_id}_*_cortical-zstack-segmentation_*")))
-    seg_dirs_700 = [d for d in seg_dirs if "700x700" in d]
-    seg_dirs = seg_dirs_700 if seg_dirs_700 else seg_dirs
+def _find_zstack_pair_multiplane(subject_id: int, fov_tag="700x700"):
+    """Resolver for a `multiplane-ophys_{subject}_*_cortical-zstack-{segmentation,registration}_*`
+    asset layout, reading pixel size from the acquisition's own metadata rather than assuming one."""
+    seg_dirs = glob.glob(str(DATA_ROOT / f"multiplane-ophys_{subject_id}_*_cortical-zstack-segmentation_*"))
+    seg_dirs_tagged = [d for d in seg_dirs if fov_tag in d]
+    seg_dirs = seg_dirs_tagged if seg_dirs_tagged else seg_dirs
     seg_tif = None
-    for d in seg_dirs:
+    for d in sorted(seg_dirs):
         t = _latest_glob(f"{d}/channel_0_ref_0/segmentation_masks.tif")
         if t:
             seg_tif = t
@@ -106,12 +126,11 @@ def _find_zstack_pair_multiplane(subject_id: int):
         raise FileNotFoundError(f"no multiplane-ophys_{subject_id}_*_cortical-zstack-segmentation_* "
                                 f"segmentation_masks.tif found under {DATA_ROOT}")
 
-    reg_dirs = sorted(glob.glob(str(DATA_ROOT / f"multiplane-ophys_{subject_id}_*_cortical-zstack-registration_*")))
-    reg_dirs_700 = [d for d in reg_dirs if "700x700" in d]
-    reg_dirs = reg_dirs_700 if reg_dirs_700 else reg_dirs
-    reg_tif = None
-    roi_meta = None
-    for d in reg_dirs:
+    reg_dirs = glob.glob(str(DATA_ROOT / f"multiplane-ophys_{subject_id}_*_cortical-zstack-registration_*"))
+    reg_dirs_tagged = [d for d in reg_dirs if fov_tag in d]
+    reg_dirs = reg_dirs_tagged if reg_dirs_tagged else reg_dirs
+    reg_tif, roi_meta = None, None
+    for d in sorted(reg_dirs):
         t = _latest_glob(f"{d}/cortical_zstack_0/channel_0_ref_0/*_2xREG.tif")
         if t:
             reg_tif = t
@@ -119,31 +138,26 @@ def _find_zstack_pair_multiplane(subject_id: int):
     if reg_tif is None:
         raise FileNotFoundError(f"no multiplane-ophys_{subject_id}_*_cortical-zstack-registration_* "
                                 f"*_2xREG.tif found under {DATA_ROOT}")
-    zstack_xy_um = _zstack_xy_um_from_roi_metadata(roi_meta) if roi_meta else 700.0 / 512.0
-    return Path(reg_tif), Path(seg_tif), zstack_xy_um
+    if roi_meta is None:
+        raise FileNotFoundError(f"no roi_groups_metadata.json alongside {reg_tif} -- cannot "
+                                f"determine this acquisition's um/px without it")
+    return Path(reg_tif), Path(seg_tif), _zstack_xy_um_from_roi_metadata(roi_meta)
 
 
-def _find_zstack_pair(subject_id: int):
-    """Pick the 700x700 acquisition (GCaMP-only OR GCaMP+Dextran -- channel_0_ref_0 is GCaMP in
-    both) with the MOST segmented ROIs in its channel_0 segmentation, when more than one
-    acquisition exists (not just the alphabetically/date-first one, and not excluding Dextran-
-    paired acquisitions -- their channel_0 is equally valid GCaMP data). Raw intensity: prefer a
-    separate `_registered` asset matching the same acquisition-name stem; if none is mounted, fall
-    back to `zstack_data.tif` co-located with the segmentation -- verified bit-identical to the
-    separately-mounted registered `_2xREG.tif` on 827543 (both are the same upstream registered
-    volume, just packaged differently), so this is not a lesser substitute.
-
-    Falls back to `_find_zstack_pair_multiplane` for the newer `multiplane-ophys_*` naming
-    convention (e.g. 833855) if no `ophys-z-stacks_*` asset is mounted."""
+def _find_zstack_pair(subject_id: int, fov_tag="700x700"):
+    """Picks the acquisition (matching `fov_tag` when more than one is mounted) with the most
+    segmented ROIs, preferring a separate registered-intensity asset and falling back to a
+    co-located raw-data file if none is mounted. Falls back to `_find_zstack_pair_multiplane` for
+    a different asset-naming convention if the primary one isn't found."""
     seg_dirs = glob.glob(str(DATA_ROOT / f"ophys-z-stacks_{subject_id}_segmented*"))
     if not seg_dirs:
-        return _find_zstack_pair_multiplane(subject_id)
+        return _find_zstack_pair_multiplane(subject_id, fov_tag)
 
     seg_stacks = []
     for d in seg_dirs:
-        seg_stacks += _700x700_stacks(d)
+        seg_stacks += _candidate_stacks(d, fov_tag)
     if not seg_stacks:
-        raise FileNotFoundError(f"no 700x700 segmented stack for subject {subject_id}")
+        raise FileNotFoundError(f"no {fov_tag} segmented stack for subject {subject_id}")
 
     seg_tifs = {}
     for stack in seg_stacks:
@@ -151,45 +165,80 @@ def _find_zstack_pair(subject_id: int):
         if t:
             seg_tifs[stack] = t
     if not seg_tifs:
-        raise FileNotFoundError(f"no segmentation_masks.tif (channel_0_ref_0) under any 700x700 "
+        raise FileNotFoundError(f"no segmentation_masks.tif (channel_0_ref_0) under any {fov_tag} "
                                 f"stack for subject {subject_id}")
 
     best_stack = max(seg_tifs, key=lambda s: _n_rois(seg_tifs[s]))
     seg_tif = seg_tifs[best_stack]
 
-    stem_name = Path(best_stack).name.split("_segmented")[0]     # e.g. ophys-z-stack-700x700x450-GCaMP_2025-12-12_15-13
+    stem_name = Path(best_stack).name.split("_segmented")[0]
+    reg_dir = None
     reg_dirs = glob.glob(str(DATA_ROOT / f"ophys-z-stacks_{subject_id}_registered*"))
     reg_tif = None
     for d in reg_dirs:
-        reg_tif = _latest_glob(f"{d}/{stem_name}_registered_*/channel_0_ref_0/*_2xREG.tif")
-        if reg_tif:
+        found_dir = _latest_glob(f"{d}/{stem_name}_registered_*")
+        t = _latest_glob(f"{found_dir}/channel_0_ref_0/*_2xREG.tif") if found_dir else None
+        if t:
+            reg_tif, reg_dir = t, found_dir
             break
     if reg_tif is None:
         reg_tif = _latest_glob(f"{best_stack}/channel_0_ref_0/zstack_data.tif")
     if reg_tif is None:
         raise FileNotFoundError(f"no raw intensity source (registered *_2xREG.tif or co-located "
                                 f"zstack_data.tif) for {best_stack}")
-    return Path(reg_tif), Path(seg_tif), 700.0 / 512.0
+
+    # roi_groups_metadata.json's location varies by acquisition pipeline version -- check every
+    # plausible spot (registered-dir root, registered-dir/channel_0_ref_0, segmented-dir/channel_0_ref_0)
+    # before giving up.
+    roi_meta = None
+    for candidate in (
+        f"{reg_dir}/roi_groups_metadata.json" if reg_dir else None,
+        f"{reg_dir}/channel_0_ref_0/roi_groups_metadata.json" if reg_dir else None,
+        f"{best_stack}/channel_0_ref_0/roi_groups_metadata.json",
+        f"{best_stack}/roi_groups_metadata.json",
+    ):
+        if candidate and _latest_glob(candidate):
+            roi_meta = _latest_glob(candidate)
+            break
+    if roi_meta is not None:
+        zstack_xy_um = _zstack_xy_um_from_roi_metadata(roi_meta)
+    else:
+        zstack_xy_um = None  # caller decides whether/how to fall back -- see resolve_subject
+    return Path(reg_tif), Path(seg_tif), zstack_xy_um
 
 
-def resolve_subject(subject_id: int) -> SubjectConfig:
+def resolve_subject(subject_id: int, fov_tag: str = "700x700",
+                    fallback_fov_um: Optional[float] = 700.0,
+                    fallback_native_px: Optional[int] = 512) -> SubjectConfig:
+    """Convenience resolver for one lab's Code-Ocean-style mounted-asset naming convention. For
+    any other data layout, construct `SubjectConfig` directly instead.
+
+    `fallback_fov_um`/`fallback_native_px`: used ONLY when no `roi_groups_metadata.json` can be
+    found for this acquisition (some older assets don't have one mounted) -- an explicit, visible,
+    overridable nominal value rather than a silent assumption. Pass `fallback_fov_um=None` to
+    require real metadata and raise instead."""
     aligned = _latest_glob(str(DATA_ROOT / f"Xenium-ophys-coregistered_{subject_id}_*"))
     if aligned is None:
         raise FileNotFoundError(f"no Xenium-ophys-coregistered_{subject_id}_* aligned-frame directory "
-                                f"under {DATA_ROOT} -- this is a hard requirement")
-    zstack_reg, zstack_seg, zstack_xy_um = _find_zstack_pair(subject_id)
-
+                                f"under {DATA_ROOT}")
+    zstack_reg, zstack_seg, zstack_xy_um = _find_zstack_pair(subject_id, fov_tag)
+    if zstack_xy_um is None:
+        if fallback_fov_um is None:
+            raise FileNotFoundError(f"no roi_groups_metadata.json found for subject {subject_id}'s "
+                                    f"z-stack, and no fallback_fov_um given -- cannot determine um/px")
+        print(f"[{subject_id}] WARNING: no roi_groups_metadata.json found -- assuming a nominal "
+              f"{fallback_fov_um}um FOV over {fallback_native_px}px (pass fallback_fov_um= to "
+              f"resolve_subject to change this).", flush=True)
+        zstack_xy_um = fallback_fov_um / fallback_native_px
     reporter_root = _latest_glob(str(DATA_ROOT / f"Xenium_{subject_id}_*_processed"))
-    manual_gt = _latest_glob(str(DATA_ROOT / f"Xenium_ophys_{subject_id}_coregistered"))
 
     return SubjectConfig(
         subject_id=subject_id,
         aligned_dir=Path(aligned),
         zstack_registered_tif=zstack_reg,
         zstack_segmented_tif=zstack_seg,
-        reporter_zarr_root=Path(reporter_root) if reporter_root else None,
-        manual_gt_dir=Path(manual_gt) if manual_gt else None,
         zstack_xy_um=zstack_xy_um,
+        reporter_zarr_root=Path(reporter_root) if reporter_root else None,
     )
 
 

@@ -1,26 +1,23 @@
 """
 Pose-seeding: three ways to get the rough starting pose (center, rotation, scale) for the initial
-landmark search at a subject's anchor Xenium section. Only mode 1 was ever real, wired code before
-this package; modes 2/3 formalize what was otherwise done ad hoc, by hand, for one subject
-(833855) into first-class functions.
+landmark search at a subject's anchor Xenium section.
 
 Mode 1 (`seed_from_auto_search`): the blind rotation x position x depth pose grid
-(`initial_match.search_anchor_section`) -- fully automatic, no human input, but a narrow/isolated
-optimum for some subjects (see `s07_k_nbest_sensitivity` investigation) and can fail outright if
-the true pose sits outside the searched position window (833855's original failure mode).
+(`initial_match.search_anchor_section`) -- fully automatic, no human input, but can be a narrow,
+isolated optimum, and can fail outright if the true pose sits outside the searched position
+window (see its own docstring).
 
 Mode 2 (`seed_from_center_rotation` + `refine_from_seed`): a human provides a rough center
 (Xenium-aligned frame, um) and rotation (deg) -- eyeballed from a confocal/vasculature image, or
-however the experimenter already has -- and only a DEPTH sweep runs automatically from there (no
-position/rotation grid). This is the exact procedure validated on 833855 (n_cert=719, the
-strongest result of any subject tested) after the blind grid failed for it.
+however already available -- and only a DEPTH sweep runs automatically from there (no
+position/rotation grid). Use this when mode 1 fails.
 
 Mode 3 (`seed_from_corners`): NOT YET IMPLEMENTED, see its docstring for why.
 """
 from dataclasses import dataclass
 import numpy as np
 
-from . import somaprint as sp2, bigwarp, ZSTACK_XY_UM, XENIUM_S2_UM
+from . import somaprint as sp2, bigwarp
 from .geometry import find_affine_transformation_2d
 from .populations import load_zstack_cells, load_xenium_cells
 from .reference_ported import find_min_z_spread_rotation
@@ -34,16 +31,15 @@ DEPTH_SWEEP_PLANES = list(range(60, 341, 20))
 class PoseSeed:
     center_um: tuple
     rotation_deg: float
-    scale: float = 0.80
+    scale: float
 
 
 def seed_from_auto_search(cfg, sec, max_workers=14, verbose=True):
-    """Mode 1: fully automatic. Runs the blind pose grid (`initial_match.search_anchor_section`,
-    k_cz=k_xen=30/n_best=10 -- validated in s07_k_nbest_sensitivity #3-4), then re-derives the
-    final tilt via `tilt_fit.fit_tilt_and_landmarks` (the validated SLAB_HALF=30 accumulate+
-    bijective procedure -- `search_anchor_section`'s OWN embedded tilt loop is the older,
-    SLAB_HALF=20, replace-not-accumulate version; kept there for backward compatibility but not
-    used for the final result here).
+    """Mode 1: fully automatic. Runs the blind pose grid (`initial_match.search_anchor_section`),
+    then re-derives the final tilt via `tilt_fit.fit_tilt_and_landmarks` (an accumulate+bijective
+    landmark procedure -- `search_anchor_section`'s own embedded tilt loop is a simpler
+    replace-not-accumulate version, kept there for its own self-contained use but not used for the
+    final result here).
 
     Returns dict(M3, R_3d, plane, moving, fixed_aligned, n_landmarks, n_rounds, tilt_deg).
     """
@@ -55,8 +51,13 @@ def seed_from_auto_search(cfg, sec, max_workers=14, verbose=True):
     return fit_tilt_and_landmarks(cfg, sec, M3, result["plane"], verbose=verbose)
 
 
-def seed_from_center_rotation(center_um, rotation_deg, scale=0.80):
-    """Mode 2, step 1: package a human-provided rough pose. Call `refine_from_seed` next."""
+def seed_from_center_rotation(center_um, rotation_deg, scale=None, cfg=None):
+    """Mode 2, step 1: package a human-provided rough pose. Call `refine_from_seed` next.
+    `scale`: the Xenium-to-z-stack linear scale prior; defaults to `cfg.tissue_expansion_scale`
+    if `cfg` is given, else the package default."""
+    if scale is None:
+        from . import DEFAULT_TISSUE_EXPANSION_SCALE
+        scale = cfg.tissue_expansion_scale if cfg is not None else DEFAULT_TISSUE_EXPANSION_SCALE
     return PoseSeed(center_um=tuple(center_um), rotation_deg=float(rotation_deg), scale=float(scale))
 
 
@@ -64,7 +65,7 @@ def refine_from_seed(cfg, sec, seed, plane_range=None, verbose=True):
     """Mode 2, step 2: given a `PoseSeed` (rough center+rotation+scale, no position/rotation
     search), sweep ONLY depth (candidate z-stack slabs) to find the plane that actually certifies
     landmarks, then hand off to `tilt_fit.fit_tilt_and_landmarks` for the real tilt fit + full
-    landmark accumulation. This is the exact 833855 procedure, generalized.
+    landmark accumulation.
 
     Returns dict(M3, R_3d, plane, moving, fixed_aligned, n_landmarks, n_rounds, tilt_deg),
     same shape as `seed_from_auto_search`.
@@ -110,26 +111,22 @@ def refine_from_seed(cfg, sec, seed, plane_range=None, verbose=True):
     return fit_tilt_and_landmarks(cfg, sec, M3_seed, plane_seed, verbose=verbose)
 
 
-def seed_from_corners(xenium_trapezoid_corners_um, top_edge, zstack_corners_um=None, scale=0.80):
+def seed_from_corners(xenium_trapezoid_corners_um, top_edge, zstack_corners_um=None, scale=None):
     """*** TODO -- NOT IMPLEMENTED. ***
 
     Mode 3: 4 Xenium tissue-trapezoid corners (Xenium ALIGNED frame, um) + `top_edge` (which
     corner/edge is the trapezoid's short/slanted top -- fixes correspondence order/orientation
-    against the z-stack's 4 corners) + optional 4 z-stack corners (would default to the canonical
-    [0,0]-[700,700]um FOV square, matching how 833855's z-stack side was actually handled: never
-    independently clicked, only assumed).
+    against the z-stack's 4 corners) + optional 4 z-stack corners (would default to the z-stack's
+    own canonical FOV rectangle).
 
-    Why not implemented now: the only historical precedent (833855) never actually exercised a
-    real corner-to-corner correspondence -- the z-stack side was assumed canonical, not measured,
-    and the *rotation* came from averaging the 4 clicked points' own edge angles (see
-    `seed_from_center_rotation`'s docstring / the project history), not from matching to 4
-    independent z-stack corners. Generalizing this into a real corners-of-trapezoid <->
-    corners-of-zstack correspondence needs to be validated against real click data from more than
-    one subject before it's trustworthy -- that data doesn't exist yet.
+    Why not implemented: there is no validated real-data precedent yet for a genuine
+    corner-to-corner correspondence between the two modalities (as opposed to deriving a rough
+    center+rotation from one side's clicked points alone, which `seed_from_center_rotation`
+    already covers). Implementing this properly needs real click data validated across more than
+    one subject before the correspondence-order/orientation logic can be trusted.
     """
     raise NotImplementedError(
         "seed_from_corners is not yet implemented -- see its docstring. Use "
-        "seed_from_center_rotation + refine_from_seed instead (mode 2), which IS validated "
-        "(833855). If you need corner-based pose input, compute center=centroid(corners) and "
-        "rotation=mean of the 4 edge angles yourself for now, matching the math historically used "
-        "for 833855, and pass those directly to seed_from_center_rotation.")
+        "seed_from_center_rotation + refine_from_seed instead (mode 2). If you need corner-based "
+        "pose input today, compute center=centroid(corners) and rotation=mean of the 4 edge "
+        "angles yourself and pass those directly to seed_from_center_rotation.")

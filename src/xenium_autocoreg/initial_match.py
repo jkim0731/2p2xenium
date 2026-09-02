@@ -1,18 +1,16 @@
-"""GT-free initial landmark search (soma-print) at one anchor Xenium section -- automates the one
-manual BigWarp step. Full pose grid-search (depth-slab x xy-seed x rotation), every combo certified
-directly (register_full -> re-match @ gate 0.8), ranked by certified count with a sanity filter on
-the implied affine (plausible isotropic scale + rotation range) to reject spurious peaks -- the
-validated 816462 recipe (depth_sweep.py / search_recipe.py from session s04, generalized).
+"""GT-free automatic initial-pose search at one anchor Xenium section: a full grid over
+depth-slab x xy-seed x rotation, every combo certified directly via soma-print point matching,
+ranked by certified count with a sanity filter on the implied affine (plausible isotropic scale +
+rotation range + a minimum match rate) to reject spurious peaks.
 """
 import numpy as np
 import tifffile as tiff
 from concurrent.futures import ProcessPoolExecutor
-from . import somaprint as sp2, bigwarp, ZSTACK_XY_UM, XENIUM_S2_UM
+from . import somaprint as sp2, bigwarp
 from .geometry import find_affine_transformation_2d, decompose_affine
 from .populations import load_zstack_cells, load_xenium_cells
 from .reference_ported import find_min_z_spread_rotation
 
-SXY = 0.80
 SEED_OFFSETS = [(200, 200), (200, -200), (-200, 200), (-200, -200), (0, 0)]
 ROTS = list(range(-30, 41, 5))
 PLANES = list(range(60, 341, 20))
@@ -21,23 +19,20 @@ R_CAND = 100.0
 REPORTER_MIN = 2
 N_CANDIDATES = 300
 
-# Symmetric k_cz=k_xen (not the original asymmetric 15/30 split -- that ratio assumed Xenium is
-# ~2x denser than the z-stack, but direct measurement (median NN spacing, robust to z-stack
-# vasculature-shadow voids) on 823049/816462/827543 finds the real density ratio much closer to 1
-# (0.70-1.25), not 1.56-2.0 -- see s07_k_nbest_sensitivity/SUMMARY.md) and n_best=10 (not 5) --
-# validated via fresh from-scratch pose grid searches on all three subjects: substantially more
-# certified pairs and higher match_rate than the old asymmetric/n_best=5 recipe in every case
-# (816462: 235->318 cert, 14.8%->20.1%; 823049: 43->182 cert, 2.3%->17.0%; 827543: 22->374 cert,
-# ~2%->31.4%). k and n_best are coupled, not independently tunable -- see the s07 sensitivity
-# investigation for why nearby settings can fail entirely.
+# k_cz=k_xen symmetric (rather than assuming one modality is systematically denser than the
+# other) and n_best well below k (rather than requiring near-total neighbor agreement) -- k and
+# n_best are coupled, not independently tunable; a nearby setting can certify nothing at all even
+# when the underlying pose is correct, so re-tune both together if match quality looks off, don't
+# nudge one in isolation.
 K = 30
 N_BEST = 10
 
 _CZ = _PL = _IDS_CZ = _XEN = _XC = None
-_FOV_UM = 700.0
+_FOV_UM = None
+_SXY = None
 
 
-def make_seed(rot_deg, cz_centroid, target, sxy=SXY):
+def make_seed(rot_deg, cz_centroid, target, sxy):
     a = np.radians(rot_deg)
     R = np.array([[np.cos(a), -np.sin(a)], [np.sin(a), np.cos(a)]])
     t = target - R @ (cz_centroid * sxy)
@@ -62,20 +57,20 @@ def _in_convex_quad(points, quad):
     return pos | neg
 
 
-def _fov_overlap_count(M0_cz_to_xen, xen_xy_um, cz_extent_um=(0.0, 700.0)):
+def _fov_overlap_count(M0_cz_to_xen, xen_xy_um, cz_extent_um):
     """How many of the candidate Xenium cells (um, aligned frame) fall inside the z-stack's
     physical FOV footprint. `M0_cz_to_xen` is the raw fit direction used in `_certify_at`
     (find_affine_transformation_2d(slab, _XEN) -- z-stack (x,y) um -> Xenium_aligned (x,y) um), so
-    we map the z-stack's own 700x700um extent FORWARD through it directly, no inversion needed."""
+    the z-stack's own FOV extent is mapped FORWARD through it directly, no inversion needed."""
     lo, hi = cz_extent_um
     corners_cz = np.array([[lo, lo], [lo, hi], [hi, hi], [hi, lo]], float)
     corners_xen = _aff(M0_cz_to_xen, corners_cz)
     return int(_in_convex_quad(xen_xy_um, corners_xen).sum())
 
 
-def _pool_init(cz, pl, ids_cz, xen, xc, fov_um=700.0):
-    global _CZ, _PL, _IDS_CZ, _XEN, _XC, _FOV_UM
-    _CZ, _PL, _IDS_CZ, _XEN, _XC, _FOV_UM = cz, pl, ids_cz, xen, xc, fov_um
+def _pool_init(cz, pl, ids_cz, xen, xc, fov_um, sxy):
+    global _CZ, _PL, _IDS_CZ, _XEN, _XC, _FOV_UM, _SXY
+    _CZ, _PL, _IDS_CZ, _XEN, _XC, _FOV_UM, _SXY = cz, pl, ids_cz, xen, xc, fov_um, sxy
 
 
 def _rank_combo(args):
@@ -83,7 +78,7 @@ def _rank_combo(args):
     slab = _CZ[(_PL >= st) & (_PL < st + 2 * SLAB_HALF)]
     if len(slab) < 20:
         return (st, rot, off, 0, 0)
-    seed = make_seed(rot, slab.mean(0), _XC + np.array(off))
+    seed = make_seed(rot, slab.mean(0), _XC + np.array(off), _SXY)
     res = sp2.register_full(slab, _XEN, seed, R_cand=R_CAND, k_cz=K, k_xen=K, n_best=N_BEST, max_rounds=3)
     ncert = 0
     if len(res["anchors"]) >= 6:
@@ -106,7 +101,7 @@ def _certify_at(st, rot, off):
     slab = _CZ[in_slab]
     ids_slab = _IDS_CZ[in_slab]
     pl_slab = _PL[in_slab]
-    seed = make_seed(rot, slab.mean(0), _XC + np.array(off))
+    seed = make_seed(rot, slab.mean(0), _XC + np.array(off), _SXY)
     res = sp2.register_full(slab, _XEN, seed, R_cand=R_CAND, k_cz=K, k_xen=K, n_best=N_BEST, max_rounds=3)
     if len(res["anchors"]) < 6:
         return None
@@ -127,23 +122,17 @@ def _certify_at(st, rot, off):
     spread = float(min(np.ptp(slab[cert[:, 0], 0]), np.ptp(slab[cert[:, 0], 1])))
 
     # Match rate: what fraction of the AVAILABLE cells in the overlap actually got certified --
-    # NOT just the raw certified count, which doesn't reveal whether a candidate is a dense,
-    # confident lock or a small set of coincidental matches riding on an unexplained population.
-    # Found via direct comparison: 816462 sec8 (the validated reference) certifies ~14-15% of the
-    # overlap population; an 823049 candidate that looked geometrically clean (isotropic, low
-    # shear, "sane") turned out to certify only ~2%, a 6-7x weaker lock the geometry check alone
-    # did not catch (see coreg-autocoreg-match-rate memory).
+    # not just the raw certified count, which doesn't reveal whether a candidate is a dense,
+    # confident lock or a small set of coincidental matches riding on an unrelated population.
     n_xen_fov = _fov_overlap_count(M0, _XEN, cz_extent_um=(0.0, _FOV_UM))
     n_cz_slab = len(slab)
     match_rate = float(len(cert) / max(1, min(n_cz_slab, n_xen_fov)))
 
-    # real tissue shrinkage between modalities should be ~isotropic (see coreg-816462-recipe /
-    # coreg-aligned-native-pipeline memories) -- checking only the MEAN scale let an anisotropic
-    # candidate (e.g. scale1=0.94, scale2=0.55, mean~0.74) slip through as "sane" on 827543;
-    # anisotropy and shear must be checked explicitly, not just the average magnitude.
-    # match_rate floor is deliberately conservative (calibrated against exactly 2 data points so
-    # far: 816462 sec8 ~14-15%, a bad 823049 candidate ~2%) -- meant to catch clearly-too-weak
-    # locks, not to finely discriminate; revisit as more subjects are run.
+    # Real tissue shrinkage/expansion between modalities should be ~isotropic -- checking only the
+    # MEAN scale lets a genuinely anisotropic (distorted) candidate slip through as "sane"; check
+    # anisotropy and shear explicitly, not just the average magnitude. The match-rate floor is a
+    # deliberately conservative sanity check, not a fine discriminator -- meant to catch clearly
+    # too-weak locks (a handful of coincidental matches on an otherwise-uncorrelated population).
     sane = (0.60 <= scale <= 0.95) and (-20 <= rotation <= 40) and spread > 150 \
         and anisotropy <= 1.15 and shear <= 0.08 and match_rate >= 0.05
     return dict(st=st, rot=rot, off=off, slab=slab, ids_slab=ids_slab, pl_slab=pl_slab, cert=cert,
@@ -160,12 +149,15 @@ def search_anchor_section(cfg, sec, max_workers=14, verbose=True):
     ids_x, xen_xy, used_reporter, n_total = load_xenium_cells(cfg, sec, aligned=True, min_count=REPORTER_MIN)
     xc = xen_xy.mean(0)
     if verbose:
-        pop = "reporter+" if used_reporter else "ALL cells (no reporter zarr for this subject)"
+        pop = "reporter+" if used_reporter else "ALL cells (no reporter population source for this subject)"
         print(f"[sec{sec}] Xenium {pop}: {len(xen_xy)}/{n_total} | z-stack cells: {len(cz_all_xy)}", flush=True)
 
+    fov_um = cfg.zstack_xy_um * cfg.zstack_shape_px[-1]
+    sxy = cfg.tissue_expansion_scale
+    pool_args = (cz_all_xy, cz_all_pl, ids_cz_all, xen_xy, xc, fov_um, sxy)
+
     combos = [(st, rot, off) for st in PLANES for rot in ROTS for off in SEED_OFFSETS]
-    with ProcessPoolExecutor(max_workers=max_workers, initializer=_pool_init,
-                              initargs=(cz_all_xy, cz_all_pl, ids_cz_all, xen_xy, xc, cfg.zstack_xy_um * 512)) as ex:
+    with ProcessPoolExecutor(max_workers=max_workers, initializer=_pool_init, initargs=pool_args) as ex:
         out = list(ex.map(_rank_combo, combos, chunksize=8))
     out.sort(key=lambda r: -r[4])
     if verbose:
@@ -175,8 +167,7 @@ def search_anchor_section(cfg, sec, max_workers=14, verbose=True):
     to_certify = [(st, rot, off) for st, rot, off, n_anc, n_cert in out[:N_CANDIDATES] if n_cert >= 6]
     if verbose:
         print(f"[sec{sec}] certifying top {len(to_certify)} candidates in parallel...", flush=True)
-    with ProcessPoolExecutor(max_workers=max_workers, initializer=_pool_init,
-                              initargs=(cz_all_xy, cz_all_pl, ids_cz_all, xen_xy, xc, cfg.zstack_xy_um * 512)) as ex:
+    with ProcessPoolExecutor(max_workers=max_workers, initializer=_pool_init, initargs=pool_args) as ex:
         certified = list(ex.map(_certify_combo, to_certify, chunksize=4))
     candidates = []
     for (st, rot, off), c in zip(to_certify, certified):
@@ -194,20 +185,17 @@ def search_anchor_section(cfg, sec, max_workers=14, verbose=True):
         if verbose:
             print(f"[sec{sec}] NO CONVERGENCE among top-{N_CANDIDATES} candidates", flush=True)
         return None
-    # rank by MATCH RATE, not raw certified count -- raw count doesn't reveal whether a candidate
-    # is a dense, confident lock or a small set of coincidental matches on an unexplained
-    # population (see coreg-autocoreg-match-rate memory: an 823049 candidate with n_cert=43 looked
-    # fine on count and geometry alone but matched only ~2% of the overlap population).
+    # Rank by match rate, not raw certified count -- raw count doesn't reveal whether a candidate
+    # is a dense, confident lock or a small set of coincidental matches on an unrelated population.
     best = max(pool, key=lambda c: c["match_rate"])
 
     # Real per-cell z (plane) of each certified z-stack ROI -- NOT the slab window's geometric
-    # center. Matches the reference's own `z_base = int(np.median(points_zstack[:,2]))` and feeds
-    # find_min_z_spread_rotation the actual z-spread of the matched ROIs (a constant z per point,
-    # as the old `np.full(..., plane)` did, would trivially fit a perfectly flat plane and always
-    # return R_3d=identity -- silently disabling the tilt fit).
+    # center. Feeds find_min_z_spread_rotation the actual z-spread of the matched ROIs (a constant
+    # z per point would trivially fit a perfectly flat plane and always return R_3d=identity --
+    # silently disabling the tilt fit).
     real_z = best["pl_slab"][best["cert"][:, 0]]
     moving = np.column_stack([best["slab"][best["cert"][:, 0]] / cfg.zstack_xy_um, real_z])
-    fixed_aligned = np.column_stack([xen_xy[best["cert"][:, 1]] / XENIUM_S2_UM, np.zeros(best["n_cert"])])
+    fixed_aligned = np.column_stack([xen_xy[best["cert"][:, 1]] / cfg.xenium_xy_um, np.zeros(best["n_cert"])])
     M_aligned, plane = bigwarp.affine_from_landmarks(moving, fixed_aligned)
     R_3d, rotated_pts = find_min_z_spread_rotation(moving)
     z_spread_before = float(np.ptp(moving[:, 2]))
@@ -221,14 +209,15 @@ def search_anchor_section(cfg, sec, max_workers=14, verbose=True):
               f"(R_3d diag={np.diag(R_3d).round(4).tolist()})", flush=True)
 
     # Iterative re-match: correct every z-stack cell's (x,y,z) for the just-fitted tilt (rotate
-    # about the volume center, same convention as reference_ported.rotate_volume), re-select the
-    # slab by the DE-TILTED z, re-run soma-print on the de-tilted x,y, then re-fit R_3d from THAT
-    # improved cert set and repeat -- until a round adds no more certified pairs. Recovers cells
-    # the flat single-z-band assumption missed near the tilt's edges (validated +24% on 816462
-    # sec8, 76->94, in round 1). Each round only adopted if it certifies strictly more pairs than
-    # the previous one, so this can never regress and is guaranteed to terminate.
-    with tiff.TiffFile(cfg.zstack_registered_tif) as tf:
-        zstack_shape = (len(tf.pages),) + tf.pages[0].shape
+    # about the volume center), re-select the slab by the DE-TILTED z, re-run soma-print on the
+    # de-tilted x,y, then re-fit R_3d from THAT improved cert set and repeat -- until a round adds
+    # no more certified pairs (recovers cells the flat single-z-band assumption missed near the
+    # tilt's edges). Each round only adopted if it certifies strictly more pairs than the previous
+    # one, so this can never regress and is guaranteed to terminate. NOTE: `tilt_fit.
+    # fit_tilt_and_landmarks` supersedes this loop with an accumulate+bijective-constrained version
+    # -- prefer that for the final tilt/landmark set; this loop is kept for `search_anchor_section`'s
+    # own self-contained pose search.
+    zstack_shape = cfg.zstack_shape_px
     P = np.array([[0, 0, 1], [0, 1, 0], [1, 0, 0]], float)
     center = np.array(zstack_shape) / 2.0
     cz_px = cz_all_xy / cfg.zstack_xy_um
@@ -244,7 +233,7 @@ def search_anchor_section(cfg, sec, max_workers=14, verbose=True):
 
         in_slab2 = (new_pl >= st) & (new_pl < st + 2 * SLAB_HALF)
         slab2, pl2 = new_xy_um[in_slab2], new_pl[in_slab2]
-        seed2 = make_seed(best["rot"], slab2.mean(0), xc + np.array(best["off"]))
+        seed2 = make_seed(best["rot"], slab2.mean(0), xc + np.array(best["off"]), sxy)
         res2 = sp2.register_full(slab2, xen_xy, seed2, R_cand=R_CAND, k_cz=K, k_xen=K, n_best=N_BEST, max_rounds=3)
         cert2 = np.empty((0, 2), int)
         if len(res2["anchors"]) >= 6:
@@ -264,7 +253,7 @@ def search_anchor_section(cfg, sec, max_workers=14, verbose=True):
 
         real_z2 = pl2[cert2[:, 0]]
         moving = np.column_stack([slab2[cert2[:, 0]] / cfg.zstack_xy_um, real_z2])
-        fixed_aligned = np.column_stack([xen_xy[cert2[:, 1]] / XENIUM_S2_UM, np.zeros(len(cert2))])
+        fixed_aligned = np.column_stack([xen_xy[cert2[:, 1]] / cfg.xenium_xy_um, np.zeros(len(cert2))])
         M_aligned, plane = bigwarp.affine_from_landmarks(moving, fixed_aligned)
         # Re-fit R_3d from the IMPROVED cert set, in the ORIGINAL (untilted) frame -- compose with
         # the running rotation so it always maps original-volume points, not the already-rotated

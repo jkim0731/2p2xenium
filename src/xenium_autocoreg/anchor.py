@@ -1,8 +1,7 @@
 """Anchor-section selection: pick the Xenium section to run the (expensive) GT-free initial search
-on. Generalizes the 816462 recipe (coreg-match-recipe project memory) -- the first section that's
-both cell-rich (>= anchor_min_cells) and past a density plateau (>= anchor_plateau_frac * max count)
--- from reporter+ counts to whatever population `populations.load_xenium_cells` returns (reporter+
-or all-cells, depending on data availability)."""
+on -- the first section that's both cell-rich (>= anchor_min_cells) and past a density plateau
+(>= anchor_plateau_frac * max count), using whatever population `populations.load_xenium_cells`
+returns (reporter+ or all-cells, depending on data availability)."""
 import numpy as np
 from .populations import load_xenium_cells
 

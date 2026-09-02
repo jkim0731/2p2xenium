@@ -1,8 +1,8 @@
 """
-Per-subject QC figure for the INITIAL MATCHED (anchor) section: initial landmark search (top row)
-vs. final registration after tilt + fine mask-based TPS (bottom row). Generalized from
-`s13_qc_figures/make_wide_qc.py` -- every subject now goes through the same `initial_match/`
-artifact format (section_N_{affine,rotation_3d,moving,fixed_aligned}.npy + result.json, produced by
+Per-subject QC figure for the initial matched (anchor) section: initial landmark search (top row)
+vs. final registration after tilt + fine mask-based TPS (bottom row). Every subject goes through
+the same `initial_match/` artifact format
+(section_N_{affine,rotation_3d,moving,fixed_aligned}.npy + result.json, produced by
 `tilt_fit.fit_tilt_and_landmarks`), so no subject-specific branching is needed here.
 
 Panels B ("ROI zoom") and D ("filled masks") are cropped to 1.1x the z-stack FOV's own footprint
@@ -11,8 +11,7 @@ cells. The bottom row shows the same region after the fitted 2D affine + 3D tilt
 warp -- the actual final registration, already living in one shared (z-stack-shaped) canvas, so
 "1.1x FOV" there is just that canvas plus a 10% margin.
 
-Affine convention (verified against `coreg/geometry.py`/`coreg/bigwarp.py`): M maps Xenium
-(row,col) -> z-stack (row,col).
+Affine convention (see geometry.py/bigwarp.py): M maps Xenium (row,col) -> z-stack (row,col).
 """
 from pathlib import Path
 import json
@@ -23,7 +22,6 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from scipy.ndimage import map_coordinates
 from skimage.segmentation import find_boundaries
-from .. import XENIUM_S2_UM
 
 ZOOM = 1.1
 SLAB_HALF_SLICE = 20   # z-stack slab half-thickness (planes) for the "filled masks" segmentation slab
@@ -126,7 +124,7 @@ def plot_initial_match_qc(cfg, sec, anchor_dir, results_dir, out_path):
     axB.scatter(mapped_xy[inw, 0], mapped_xy[inw, 1], s=14, c="red", marker="x", lw=1.0,
                label="z-stack -> Xenium-aligned")
     axB.set_xlim(bx0, bx1); axB.set_ylim(by1, by0); axB.legend(loc="lower right", fontsize=7)
-    dres_um = np.linalg.norm(mapped_xy - fixed_xy, axis=1) * XENIUM_S2_UM
+    dres_um = np.linalg.norm(mapped_xy - fixed_xy, axis=1) * cfg.xenium_xy_um
     med_res = np.median(dres_um[inw]) if inw.sum() else float("nan")
     axB.set_title(f"B) ROI (1.1x FOV), {int(inw.sum())} pairs in view\nmedian residual {med_res:.1f} um", weight="bold")
     axB.set_xlabel("Xenium-aligned x (px)")
