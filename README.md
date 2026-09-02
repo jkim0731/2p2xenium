@@ -165,6 +165,15 @@ pytest
 All tests are synthetic/fast and need no mounted subject data -- they exercise the geometry
 primitives, the SVD scale-clip, soma-print point matching, and cell-mask IoU logic directly.
 
+### Real-data test fixture
+
+A ~71MB real-data fixture (5 Xenium sections + a +/-70um z-stack crop around one subject's
+validated anchor) is available on this repo's [Releases](../../releases) page rather than
+committed into the repository -- see the release notes / bundled `DATASET.md` for exactly where
+it's from (source Code Ocean data asset IDs) and how it was generated (anchor pose search,
+tilt fitting, and the float16/label-remap downcasting, empirically validated to not change this
+pipeline's matching output).
+
 ## Known limitations
 
 - No ground-truth comparison is available for this pipeline's outputs -- there is no bundled
