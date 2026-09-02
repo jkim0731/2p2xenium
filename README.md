@@ -4,6 +4,10 @@ GT-free coregistration of an **in-vivo 2-photon cortical z-stack** to **Xenium s
 transcriptomics** sections of the same mouse cortex, so the same physical cell can be found in
 both modalities.
 
+- Initial protocol development by Omid Zobeiri @ Allen Institute: Xenium slice alignment, tilt fitting,
+chain-refine propagation, fine registration, and 3D point mapping
+- This repo added automatic initial landmark searching, enabling the full co-registration process automatic.
+
 ## Install
 
 ```bash
@@ -39,15 +43,14 @@ pip install -e ".[test]"
    SVD-scale-clipped correction affine each round (`chain_refine.clip_affine_scale` -- prevents a
    weak-signal section drifting into an unphysical anisotropic-scale affine that would otherwise
    propagate to every section downstream). The seed step is scaled by the actual **gap in Xenium
-   section numbers** between consecutive processed sections (some subjects are missing sections --
-   e.g. 11-14 -- and a fixed per-step size would badly under- or over-shoot the seed for the first
-   section after a gap), using a running mean of observed plane-step-per-section.
-4. **Fine registration** (`fine_registration.register_section`): fine mask-based tile correlation
+   section numbers** between consecutive processed sections (some subjects are missing sections),
+   using a running mean of observed plane-step-per-section.
+5. **Fine registration** (`fine_registration.register_section`): fine mask-based tile correlation
    (tight window, binary cell masks, not raw intensity) -> thin-plate-spline control points -> warp
    the z-stack into the Xenium-affine-transformed frame -> the probability-filtered cell-matching
    metric (kNN spatial-shift null model -> Mahalanobis distance -> empirical p-value;
    `valid = iou>0.2 & p<0.05`).
-5. **3D point mapping** (`transform_xenium_points.run_transform_xenium_points`): maps every Xenium
+6. **3D point mapping** (`transform_xenium_points.run_transform_xenium_points`): maps every Xenium
    cell centroid (not just matched ones) into 3D z-stack coordinates, both non-rigid (TPS) and
    rigid (affine + tilt).
 
@@ -140,24 +143,6 @@ primitives, the SVD scale-clip, soma-print point matching, and cell-mask IoU log
 (`test_pose_seed.py`) is anchored to the real, validated numbers from the one subject where
 `center-rotation` mode was actually used in production.
 
-## What was dropped, and why
-
-Ported from two predecessor packages (`coreg`, `xenium-ophys-autocoreg`) that had accumulated
-several superseded algorithm generations. Kept only what the final, validated procedure actually
-calls; everything else moved to [`src/xenium_autocoreg/archive/`](src/xenium_autocoreg/archive/)
-(not maintained, not part of the public API, imports may be stale):
-
-| archived module | superseded by |
-|---|---|
-| `sections.py` (tissue-contour + ICP section-to-section self-alignment) | using the data provider's own already-aligned `*_aligned.tif` files directly |
-| `somaprint_3d.py` (true 3D point-cloud soma-print matching) | 2D soma-print matching within a fixed-depth slab (`somaprint.py`) -- explored, never adopted for the final protocol |
-| `global_pose.py` (template-cross-correlation automatic pose search) | soma-print-based `initial_match.search_anchor_section` |
-| `tile_warp_serial.py` | the parallel implementation (`tile_warp.py`) |
-| `tps.py` (standalone TPS helper) | fitting TPS inline via `scipy.interpolate.Rbf` in `fine_registration.py` |
-| `cell_matching_simple.py` (plain IoU matching) | the statistically-filtered version (`cell_matching.py`) |
-| `qc_confocal.py` | belonged to an unrelated confocal-bridging investigation, not this pipeline |
-| `fine_register_old.py` | `fine_registration.py` (fixed: fine TPS control points now come from the *mask*-based tight tile pass, not the coarse intensity pass; probability matching now always runs) |
-| `pipeline_old.py`, `qc_old.py` | `cli.py` + the QC functions wired into `fine_registration.py`/`cell_matching.py`/`qc/initial_match.py` |
 
 ## Known limitations
 
