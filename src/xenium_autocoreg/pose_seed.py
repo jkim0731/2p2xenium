@@ -80,7 +80,8 @@ def refine_from_seed(cfg, sec, seed, plane_range=None, verbose=True):
 
     best = None
     for st in planes:
-        slab = cz_xy_um[(cz_pl >= st) & (cz_pl < st + 2 * SLAB_HALF)]
+        in_slab = (cz_pl >= st) & (cz_pl < st + 2 * SLAB_HALF)
+        slab, pl_slab = cz_xy_um[in_slab], cz_pl[in_slab]
         if len(slab) < 20:
             continue
         seed_fn = make_seed(seed.rotation_deg, slab.mean(0), np.asarray(seed.center_um), seed.scale)
@@ -88,6 +89,12 @@ def refine_from_seed(cfg, sec, seed, plane_range=None, verbose=True):
         if len(res["anchors"]) < 6:
             log(f"[{cfg.subject_id}] sec{sec} depth sweep: plane~{st + SLAB_HALF} n_anchors={len(res['anchors'])}")
             continue
+        # M0 here maps z-stack(x,y) -> Xenium(x,y) (fit directly on the um point clouds, for
+        # internal soma-print matching use only) -- NOT the same convention as the official
+        # M3 (Xenium(row,col) -> z-stack(row,col), from bigwarp.affine_from_landmarks) that
+        # fit_tilt_and_landmarks expects. Rebuild the proper M3 from the certified landmarks
+        # below rather than reusing M0 directly -- passing M0 as-is silently breaks the
+        # downstream tilt fit (wrong direction AND wrong coordinate order).
         M0 = find_affine_transformation_2d(slab[res["anchors"][:, 0]], xen_xy[res["anchors"][:, 1]])
         r = sp2.match(slab, xen_xy, lambda p: _aff(M0, p), R_cand=30.0, n_best=N_BEST, anchor_frac=0.8,
                       k_cz=K, k_xen=K, max_rounds=3)
@@ -96,18 +103,21 @@ def refine_from_seed(cfg, sec, seed, plane_range=None, verbose=True):
             cert = sp2.flow_filter(cert, _aff(M0, slab)[cert[:, 0]], xen_xy)
         log(f"[{cfg.subject_id}] sec{sec} depth sweep: plane~{st + SLAB_HALF} n_cert={len(cert)}")
         if best is None or len(cert) > best[1]:
-            best = (st, len(cert), M0)
+            best = (st, len(cert), slab, pl_slab, cert)
 
     if best is None or best[1] < 6:
         raise RuntimeError(f"[{cfg.subject_id}] sec{sec}: depth sweep found nothing plausible from "
                           f"the given seed (center={seed.center_um}, rotation={seed.rotation_deg}) "
                           f"-- check the seed, or widen `plane_range`")
 
-    st_best, n_cert_best, M0_best = best
-    plane_seed = st_best + SLAB_HALF
-    log(f"[{cfg.subject_id}] sec{sec}: depth sweep winner plane={plane_seed} n_cert={n_cert_best}")
+    st_best, n_cert_best, slab_best, pl_best, cert_best = best
+    log(f"[{cfg.subject_id}] sec{sec}: depth sweep winner plane~{st_best + SLAB_HALF} n_cert={n_cert_best}")
 
-    M3_seed = M0_best[:3, :3] if M0_best.shape == (4, 3) else M0_best
+    real_z = pl_best[cert_best[:, 0]]
+    moving = np.column_stack([slab_best[cert_best[:, 0]] / cfg.zstack_xy_um, real_z])
+    fixed_aligned = np.column_stack([xen_xy[cert_best[:, 1]] / cfg.xenium_xy_um, np.zeros(len(cert_best))])
+    M_aligned, plane_seed = bigwarp.affine_from_landmarks(moving, fixed_aligned)
+    M3_seed = M_aligned[:3, :3] if M_aligned.shape == (4, 3) else M_aligned
     return fit_tilt_and_landmarks(cfg, sec, M3_seed, plane_seed, verbose=verbose)
 
 
