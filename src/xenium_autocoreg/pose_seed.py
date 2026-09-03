@@ -53,11 +53,11 @@ def seed_from_auto_search(cfg, sec, max_workers=14, verbose=True):
 
 def seed_from_center_rotation(center_um, rotation_deg, scale=None, cfg=None):
     """Mode 2, step 1: package a human-provided rough pose. Call `refine_from_seed` next.
-    `scale`: the Xenium-to-z-stack linear scale prior; defaults to `cfg.tissue_expansion_scale`
+    `scale`: the z-stack-to-Xenium linear scale factor; defaults to `cfg.zstack_scale_to_Xenium`
     if `cfg` is given, else the package default."""
     if scale is None:
-        from . import DEFAULT_TISSUE_EXPANSION_SCALE
-        scale = cfg.tissue_expansion_scale if cfg is not None else DEFAULT_TISSUE_EXPANSION_SCALE
+        from . import DEFAULT_ZSTACK_SCALE_TO_XENIUM
+        scale = cfg.zstack_scale_to_Xenium if cfg is not None else DEFAULT_ZSTACK_SCALE_TO_XENIUM
     return PoseSeed(center_um=tuple(center_um), rotation_deg=float(rotation_deg), scale=float(scale))
 
 

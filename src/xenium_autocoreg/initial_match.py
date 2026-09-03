@@ -153,7 +153,7 @@ def search_anchor_section(cfg, sec, max_workers=14, verbose=True):
         print(f"[sec{sec}] Xenium {pop}: {len(xen_xy)}/{n_total} | z-stack cells: {len(cz_all_xy)}", flush=True)
 
     fov_um = cfg.zstack_xy_um * cfg.zstack_shape_px[-1]
-    sxy = cfg.tissue_expansion_scale
+    sxy = cfg.zstack_scale_to_Xenium
     pool_args = (cz_all_xy, cz_all_pl, ids_cz_all, xen_xy, xc, fov_um, sxy)
 
     combos = [(st, rot, off) for st in PLANES for rot in ROTS for off in SEED_OFFSETS]

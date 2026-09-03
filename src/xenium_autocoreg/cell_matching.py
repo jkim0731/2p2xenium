@@ -146,8 +146,7 @@ def _save_cell_matching_qc(qc_dir, section, xenium_masks, ophys_masks, masks_ids
             axs[2].fill(contour[:, 1], contour[:, 0], linewidth=1, color="blue", alpha=0.5, edgecolor="blue")
     axs[2].set_xticks([]); axs[2].set_yticks([])
     plt.suptitle(f"Section {section} - Cell Matching", fontsize=16)
-    fig.savefig(qc_dir / f"section_{section}_cell_matching__.svg", format="svg")
-    fig.savefig(qc_dir / f"section_{section}_cell_matching__.png")
+    fig.savefig(qc_dir / f"section_{section}_cell_matching.png")
     plt.close(fig)
 
 

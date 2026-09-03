@@ -1,12 +1,13 @@
 # xenium-autocoreg (2p2xenium)
 
-GT-free coregistration of an **in-vivo 2-photon cortical z-stack** to **Xenium spatial
-transcriptomics** sections of the same mouse cortex, so the same physical cell can be found in
+Automatic coregistration of an **in-vivo 2-photon structural z-stack** to **Xenium spatial transcriptomics** sections of the same mouse cortex, so the same physical cell can be found in
 both modalities.
 
 - Initial protocol development by Omid Zobeiri @ Allen Institute: Xenium slice alignment, tilt fitting,
 chain-refine propagation, fine registration, and 3D point mapping
-- This repo added automatic initial landmark searching, enabling the full co-registration process automatic.
+- This repo added automatic initial landmark searching using the Soma-print point-cloud descriptor
+  ([Wang et al., 2026](https://www.biorxiv.org/content/10.64898/2026.04.28.719500v1)), enabling the
+  full co-registration process to run automatically.
 
 ## Install
 
@@ -18,8 +19,21 @@ pip install -e ".[test]"
 
 ## The process
 
-1. **Pose seeding** (find a rough starting pose -- center, rotation, scale -- for one anchor
-   Xenium section): 3 modes, see [`src/xenium_autocoreg/pose_seed.py`](src/xenium_autocoreg/pose_seed.py).
+1. **Anchor-section selection** (`anchor.select_anchor_section`): pick the one Xenium section to
+   run the (expensive) initial pose search on. Counts cells per section (whichever population
+   `populations.load_xenium_cells` returns -- reporter+ or all-cells) and picks the first section
+   (in section-number order) that's both cell-rich (>= `ANCHOR_MIN_CELLS`, default 1000) and past
+   a density plateau (>= `ANCHOR_PLATEAU_FRAC`, default 0.80, of the densest section's count) --
+   falling back to the single densest section if none clears that bar. The idea: an early, sparse
+   section (e.g. right at a tissue edge) is a weak foundation for the one search the rest of the
+   chain propagates from, so skip past the density ramp-up first.
+2. **Pose seeding** (find a rough starting pose -- center, rotation, scale -- for the anchor
+   section): 3 modes, see [`src/xenium_autocoreg/pose_seed.py`](src/xenium_autocoreg/pose_seed.py).
+   Both implemented modes certify candidate landmark correspondences with the Soma-print
+   point-cloud descriptor ([Wang et al.,
+   2026](https://www.biorxiv.org/content/10.64898/2026.04.28.719500v1); `somaprint.py`) -- a
+   rotation-invariant per-cell neighbor-constellation signature that lets a candidate pose be
+   scored by how many bijective, mutually-consistent cell pairs it certifies, not just raw overlap.
    - `auto` -- fully automatic blind rotation x position x depth pose grid
      (`initial_match.search_anchor_section`). No human input, but can fail outright if the true
      pose sits outside the searched position window (see "Known limitations").
@@ -29,13 +43,13 @@ pip install -e ".[test]"
      `auto` fails.
    - `corners` -- **not yet implemented** (see the docstring on `pose_seed.seed_from_corners` for
      exactly why, and what real click data is needed before it can be).
-2. **Tilt fitting** (`tilt_fit.fit_tilt_and_landmarks`): iteratively match landmarks in a z-stack
+3. **Tilt fitting** (`tilt_fit.fit_tilt_and_landmarks`): iteratively match landmarks in a z-stack
    slab around the seeded pose, accumulate new ones (bijective -- no z-stack or Xenium cell reused
    across landmarks), fit a 3D tilt correction `R_3d` from the *full* accumulated set, de-tilt the
    z-stack population, re-match in the newly-revealed slab, repeat until a round finds no new
    landmarks. `R_3d` is then held **fixed** for the rest of the pipeline -- the z-stack volume is
    rotated once, not per section.
-3. **Chain-refine propagation** (`chain_refine.run_chain`): starting from the anchor's converged
+4. **Chain-refine propagation** (`chain_refine.run_chain`): starting from the anchor's converged
    pose, walk outward section-by-section (forward and backward), seeding each section from the
    *previous* section's own converged result via image-intensity tile correlation, composing an
    SVD-scale-clipped correction affine each round (`chain_refine.clip_affine_scale` -- prevents a
@@ -43,12 +57,12 @@ pip install -e ".[test]"
    propagate to every section downstream). The seed step is scaled by the actual **gap in Xenium
    section numbers** between consecutive processed sections (some subjects are missing sections),
    using a running mean of observed plane-step-per-section.
-4. **Fine registration** (`fine_registration.register_section`): fine mask-based tile correlation
+5. **Fine registration** (`fine_registration.register_section`): fine mask-based tile correlation
    (tight window, binary cell masks, not raw intensity) -> thin-plate-spline control points -> warp
    the z-stack into the Xenium-affine-transformed frame -> the probability-filtered cell-matching
    metric (kNN spatial-shift null model -> Mahalanobis distance -> empirical p-value;
    `valid = iou>0.2 & p<0.05`).
-5. **3D point mapping** (`transform_xenium_points.run_transform_xenium_points`): maps every Xenium
+6. **3D point mapping** (`transform_xenium_points.run_transform_xenium_points`): maps every Xenium
    cell centroid (not just matched ones) into 3D z-stack coordinates, both non-rigid (TPS) and
    rigid (affine + tilt).
 
@@ -58,7 +72,17 @@ pip install -e ".[test]"
   un-aligned files):
   - `Xenium_images/section_N_Neurons_aligned.tif`
   - `Xenium_segmentation_masks/section_N_{Masks,Masks_outline}_aligned.tif`
-- **z-stack, registered + segmented**: a single-channel (or channel-0-of-multichannel) intensity
+
+  "Aligned" here means section-to-section: consecutive Xenium sections have already been
+  registered to each other (so the same tissue landmark sits at the same pixel across sections N,
+  N+1, N-1, ...) by whatever upstream process produced these files -- this pipeline does not do
+  that alignment itself, it only consumes it. This is a different, prior step from what this
+  pipeline itself produces (`Xenium_affine_transformed/`, which further warps the aligned frame
+  into the z-stack's own frame). If your data isn't already section-to-section aligned, align it
+  first; feeding in raw, un-aligned per-section files will silently produce a wrong pose (each
+  section would need its own independent search, not the one shared anchor+chain this pipeline
+  assumes).
+- **z-stack, registered + segmented**: a single-channel intensity
   volume and its matching label-mask segmentation, same shape, same physical FOV.
 - Optional: a reporter-transcript Xenium population source (used to restrict matching to
   reporter+ cells when available; falls back to all segmented cells otherwise).
@@ -74,8 +98,8 @@ view, pixel count, or resolution:
 | `zstack_xy_um` | z-stack lateral pixel size (um/px) | *(required, no default -- read from acquisition metadata)* |
 | `z_step_um` | z-stack axial resolution (um/plane) | `1.0` |
 | `xenium_xy_um` | Xenium morphology-image pixel size (um/px) | `0.2125 * 3.9996` |
-| `tissue_expansion_scale` | Xenium-to-z-stack linear scale prior (processing shrink/expansion) | `0.80` |
-| `section_spacing_um` | nominal physical spacing between Xenium sections, if known (purely informational -- the pipeline estimates the real per-section step empirically) | `None` |
+| `zstack_scale_to_Xenium` | multiply a z-stack point's um coordinates by this to land in the Xenium-aligned frame's um scale (accounts for tissue processing shrink/expansion between the two modalities) | `0.80` |
+| `section_spacing_um` | nominal physical spacing between Xenium sections -- a coarse prior only; the pipeline estimates the real per-section plane step empirically as it propagates, so this is not load-bearing | `15.0` |
 | `zstack_shape_px` | `(Z, H, W)` of the z-stack volume | read from the segmentation file's header |
 | `zstack_fov_um` | physical `(H, W)` field of view | derived from `zstack_shape_px * zstack_xy_um` |
 
@@ -85,7 +109,7 @@ from xenium_autocoreg.config import SubjectConfig
 cfg = SubjectConfig(
     subject_id=..., aligned_dir=..., zstack_registered_tif=..., zstack_segmented_tif=...,
     zstack_xy_um=1.234,               # required -- read from your acquisition's own metadata
-    tissue_expansion_scale=0.82,      # override if your tissue prep differs from the default
+    zstack_scale_to_Xenium=0.82,      # override if your tissue prep differs from the default
 )
 ```
 `config.resolve_subject` is an OPTIONAL convenience resolver for one lab's Code-Ocean-style mounted
@@ -103,7 +127,7 @@ xenium-autocoreg <subject_id> /path/to/out --pose-mode center-rotation --pose-js
 ```json
 {"center_um": [1200.0, 1500.0], "rotation_deg": 10.0, "scale": 0.80}
 ```
-(`"scale"` is optional -- defaults to the subject's own `tissue_expansion_scale` if omitted.)
+(`"scale"` is optional -- defaults to the subject's own `zstack_scale_to_Xenium` if omitted.)
 
 ## Output structure
 
@@ -139,7 +163,7 @@ xenium-autocoreg <subject_id> /path/to/out --pose-mode center-rotation --pose-js
 ├── ophys-z-stacks_segmentation_masks/    # raw segmentation + a computed outline + regionprops cache
 ├── QC/
 │   ├── xenium_affine_zstack/section_N_xenium_affine_zstack.png   # 2x3: z-stack/Xenium/overlap, intensity + masks
-│   ├── cell_matching/section_N_cell_matching__.{png,svg}         # 3-panel: contours + valid-match overlay
+│   ├── cell_matching/section_N_cell_matching.png                 # 3-panel: contours + valid-match overlay
 │   └── initial_match/section_N_initial_match_wide.png            # anchor-only: landmark search vs. final registration
 ├── propagation_summary.json              # per-section [{"sec","z_base","n_tiles","n_tiles_ok","n_valid_matches"}, ...]
 └── _chain_internal/                      # chain_refine's own working files (harmless scratch)
@@ -149,7 +173,7 @@ xenium-autocoreg <subject_id> /path/to/out --pose-mode center-rotation --pose-js
 
 - **`QC/xenium_affine_zstack/section_N_xenium_affine_zstack.png`** -- one per section: a 2x3 panel
   (z-stack / Xenium / overlap, intensity on top, masks on bottom) showing the final registration.
-- **`QC/cell_matching/section_N_cell_matching__.png`** -- one per section: 3 panels (Xenium cell
+- **`QC/cell_matching/section_N_cell_matching.png`** -- one per section: 3 panels (Xenium cell
   contours, z-stack cell contours, overlay of only the statistically-valid matched pairs).
 - **`QC/initial_match/section_N_initial_match_wide.png`** -- **anchor section only**: a 2x3 panel,
   top row = the initial landmark search (full-section context + a 1.1x-FOV zoomed
@@ -167,18 +191,49 @@ primitives, the SVD scale-clip, soma-print point matching, and cell-mask IoU log
 
 ### Real-data test fixture
 
-A ~71MB real-data fixture (5 Xenium sections + a +/-70um z-stack crop around one subject's
+A ~89MB real-data fixture (5 Xenium sections + a grid-aligned z-stack crop around one subject's
 validated anchor) is available on this repo's [Releases](../../releases) page rather than
 committed into the repository -- see the release notes / bundled `DATASET.md` for exactly where
-it's from (source Code Ocean data asset IDs) and how it was generated (anchor pose search,
-tilt fitting, and the float16/label-remap downcasting, empirically validated to not change this
-pipeline's matching output).
+it's from (source Code Ocean data asset IDs), how it was generated (anchor pose search, tilt
+fitting, and the float16/label-remap downcasting, empirically validated to not change this
+pipeline's matching output), and its `validated_test_cases`, where BOTH pose-seeding modes
+(`auto` and `center-rotation`) are run directly against the released files and converge to the
+identical result -- a real regression target, not just example data.
+
+**To use it:**
+```bash
+# download and unzip the asset from this repo's Releases page, then:
+cd test_data
+python -c "
+import json
+from pathlib import Path
+from xenium_autocoreg.config import SubjectConfig
+from xenium_autocoreg import pose_seed as ps
+
+meta = json.load(open('metadata.json'))
+cfg = SubjectConfig(
+    subject_id=meta['subject_id'],
+    aligned_dir=Path('aligned'),
+    zstack_registered_tif=Path('zstack/zstack_registered_cropped.tif'),
+    zstack_segmented_tif=Path('zstack/zstack_segmented_cropped.tif'),
+    zstack_xy_um=meta['zstack_xy_um'],
+)
+result = ps.seed_from_auto_search(cfg, meta['anchor_sec'])
+print(result['plane'], result['n_landmarks'], result['tilt_deg'])
+# compare against metadata.json's validated_test_cases.mode1_auto_search.result
+"
+```
+Note: the CLI's `run_subject()` currently always resolves its config via `resolve_subject(subject_id)`
+(the mounted-asset convention), so it can't yet be pointed at an arbitrary `SubjectConfig` -- use
+the lower-level stage functions (`pose_seed`, `chain_refine`, `fine_registration`, ...) directly
+against the fixture's own `SubjectConfig`, as above, rather than the `xenium-autocoreg` command.
+`metadata.json`'s `z_base_in_cropped_volume` (NOT `z_base_original`) is the correct `z_base` for
+this cropped volume. Either pose-seeding mode should reproduce the exact
+`plane`/`n_landmarks`/`tilt_deg` recorded in `metadata.json`'s `validated_test_cases` -- if it
+doesn't, that's a real regression.
 
 ## Known limitations
 
-- No ground-truth comparison is available for this pipeline's outputs -- there is no bundled
-  benchmark/scoring step, and results should be evaluated by independent QC (the figures above),
-  not by an internal GT metric.
 - The SVD scale-clip in `chain_refine.clip_affine_scale` bounds scale but not shear -- a
   weak-correlation section can still show shear-driven cell-shape distortion.
 - `auto` pose-seeding can fail outright (see `pose_seed.seed_from_auto_search`'s docstring) if the

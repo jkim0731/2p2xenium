@@ -13,7 +13,7 @@ Usage:
 
 `--pose-json PATH` is an alternative to inline flags for mode 2/3, pointing at a JSON file:
     {"center_um": [x, y], "rotation_deg": r, "scale": 0.8}   (mode 2; "scale" optional --
-    defaults to the subject's own SubjectConfig.tissue_expansion_scale if omitted)
+    defaults to the subject's own SubjectConfig.zstack_scale_to_Xenium if omitted)
     {"xenium_trapezoid_corners_um": [[x,y],[x,y],[x,y],[x,y]], "top_edge": 0}      (mode 3, TODO)
 """
 from __future__ import annotations
@@ -139,7 +139,7 @@ def main(argv=None):
     p.add_argument("--center-um", default=None, help="X,Y (comma-separated) for --pose-mode center-rotation")
     p.add_argument("--rotation-deg", type=float, default=None)
     p.add_argument("--scale", type=float, default=None,
-                  help="Xenium-to-z-stack scale prior; defaults to the subject's own config value if omitted")
+                  help="z-stack-to-Xenium scale factor; defaults to the subject's own config value if omitted")
     p.add_argument("--pose-json", default=None, help="JSON file alternative to the inline flags above")
     args = p.parse_args(argv)
 

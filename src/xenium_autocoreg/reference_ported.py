@@ -174,7 +174,13 @@ def rotate_volume(volume, R, order=1):
     center = np.array(volume.shape) / 2.0
     R_vol_inv = R_vol.T
     offset = center - R_vol_inv @ center
-    return affine_transform(volume, R_vol_inv, offset=offset, order=order)
+    # scipy.ndimage.affine_transform does not support float16 -- upcast for the transform and
+    # cast back, rather than forcing every caller to avoid float16 volumes entirely.
+    in_dtype = volume.dtype
+    if in_dtype == np.float16:
+        volume = volume.astype(np.float32)
+    out = affine_transform(volume, R_vol_inv, offset=offset, order=order)
+    return out.astype(in_dtype) if in_dtype == np.float16 else out
 
 
 def get_2d_to_3d_transform_func(R, affine_matrix, z_base, volume_shape):

@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from . import DEFAULT_XENIUM_PX_UM, DEFAULT_Z_STEP_UM, DEFAULT_TISSUE_EXPANSION_SCALE
+from . import DEFAULT_XENIUM_PX_UM, DEFAULT_Z_STEP_UM, DEFAULT_ZSTACK_SCALE_TO_XENIUM
 
 DATA_ROOT = Path(os.environ.get("XENIUM_AUTOCOREG_DATA_ROOT", "/data"))
 
@@ -41,14 +41,16 @@ class SubjectConfig:
     reporter_zarr_root: Optional[Path] = None    # optional reporter-transcript population source;
                                                   # None -> fall back to all segmented cells
     z_step_um: float = DEFAULT_Z_STEP_UM             # z-stack axial resolution (um/plane)
-    tissue_expansion_scale: float = DEFAULT_TISSUE_EXPANSION_SCALE  # linear scale prior between
-                                                                    # the two modalities (see README)
+    zstack_scale_to_Xenium: float = DEFAULT_ZSTACK_SCALE_TO_XENIUM  # multiply a z-stack point's
+                                                                    # um coords by this to land in
+                                                                    # the Xenium-aligned frame (see README)
     xenium_xy_um: float = DEFAULT_XENIUM_PX_UM       # Xenium morphology-image pixel size (um/px)
-    section_spacing_um: Optional[float] = None       # nominal physical spacing between consecutive
-                                                      # Xenium sections, if known -- purely informational
-                                                      # (the pipeline estimates the real per-section
-                                                      # plane step empirically as it propagates; this
-                                                      # is not required for that estimate to work)
+    section_spacing_um: float = 15.0                 # nominal physical spacing between consecutive
+                                                      # Xenium sections -- the pipeline estimates the
+                                                      # real per-section plane step empirically as it
+                                                      # propagates, so this default is only a coarse
+                                                      # prior, not load-bearing; override with your
+                                                      # own acquisition's real value when known
     _zstack_shape_px: Optional[tuple] = field(default=None, repr=False, compare=False)
 
     @property

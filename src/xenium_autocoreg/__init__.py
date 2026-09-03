@@ -7,8 +7,8 @@ Default acquisition parameters -- starting points only, every one is overridable
 """
 DEFAULT_XENIUM_PX_UM = 0.2125 * 3.9996   # Xenium morphology-image pixel size (um/px)
 DEFAULT_Z_STEP_UM = 1.0                  # z-stack native axial resolution (um/plane)
-DEFAULT_TISSUE_EXPANSION_SCALE = 0.80    # Xenium-tissue-to-z-stack linear scale prior (processing
-                                          # shrink/expansion between the two modalities)
+DEFAULT_ZSTACK_SCALE_TO_XENIUM = 0.80    # linear factor: multiply a z-stack point's um coordinates
+                                          # by this to land in the Xenium-aligned frame's um scale
 
-__all__ = ["DEFAULT_XENIUM_PX_UM", "DEFAULT_Z_STEP_UM", "DEFAULT_TISSUE_EXPANSION_SCALE"]
+__all__ = ["DEFAULT_XENIUM_PX_UM", "DEFAULT_Z_STEP_UM", "DEFAULT_ZSTACK_SCALE_TO_XENIUM"]
 __version__ = "0.1.0"
