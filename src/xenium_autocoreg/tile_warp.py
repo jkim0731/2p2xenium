@@ -5,7 +5,7 @@ Kept as a separate function (not a drop-in replacement of the shared coreg modul
 see verify_parallel_tilewarp.py for the exact-match check against the original serial function."""
 import numpy as np
 from scipy.signal import fftconvolve
-from concurrent.futures import ProcessPoolExecutor
+from .resources import pool_map
 
 _IMG_F = _VOL = _TILE = _MAX_SHIFT = _ZBASE = None
 
@@ -62,9 +62,10 @@ def _one_tile(y0x0):
 
 
 def tile_based_warping_parallel(img, vol, z_base, margin=5, tile_size=(64, 64),
-                                overlap=0.4, max_shift=(10, 20, 20), max_workers=14, **_ignore):
+                                overlap=0.4, max_shift=(10, 20, 20), num_cpus=None, **_ignore):
     """Same signature/outputs as coreg.tile_warp.tile_based_warping (drops the `progress` kwarg;
-    absorbed by **_ignore for call-compatibility), parallelized over tiles via ProcessPoolExecutor."""
+    absorbed by **_ignore for call-compatibility), parallelized over tiles via ProcessPoolExecutor
+    (or run serially if `num_cpus` resolves to that -- see `resources.resolve_num_cpus`)."""
     tile_size_arr = np.asarray(tile_size)
     step = (tile_size_arr * (1 - overlap)).astype(int)
     y_size, x_size = img.shape
@@ -79,9 +80,8 @@ def tile_based_warping_parallel(img, vol, z_base, margin=5, tile_size=(64, 64),
     n = len(tile_starts)
 
     img_f = img.astype(np.float64)
-    with ProcessPoolExecutor(max_workers=max_workers, initializer=_pool_init,
-                              initargs=(img_f, vol, tuple(tile_size), tuple(max_shift), z_base)) as ex:
-        out = list(ex.map(_one_tile, [tuple(p) for p in tile_starts], chunksize=4))
+    out = pool_map(_one_tile, [tuple(p) for p in tile_starts], num_cpus, initializer=_pool_init,
+                  initargs=(img_f, vol, tuple(tile_size), tuple(max_shift), z_base), chunksize=4)
 
     best_corrs = np.array([o[0] for o in out])
     base_corrs = np.array([o[1] for o in out])

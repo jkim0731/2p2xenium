@@ -9,10 +9,10 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from pathlib import Path
-from concurrent.futures import ProcessPoolExecutor
 from skimage.measure import find_contours
 from scipy.stats import chi2, false_discovery_control
 from .reference_ported import calculate_centroid, find_mask_matches_fast
+from .resources import pool_map
 
 K = 5
 
@@ -157,10 +157,10 @@ def _match_one(args):
                                       rng=np.random.default_rng(seed))
 
 
-def run_cell_matching_probability(subject_id, out_dir, sections, max_workers=14):
+def run_cell_matching_probability(subject_id, out_dir, sections, num_cpus=None):
     """Each section is independent (its own random-shift null model) -- parallelized across
     sections. A per-section seed (derived from the section number) keeps results reproducible
-    regardless of worker scheduling order."""
+    regardless of worker scheduling order. `num_cpus`: see `resources.resolve_num_cpus`."""
     out_dir = Path(out_dir)
     xenium_dir = out_dir / "Xenium_affine_transformed"
     ophys_dir = out_dir / "warped_zstacks"
@@ -168,8 +168,7 @@ def run_cell_matching_probability(subject_id, out_dir, sections, max_workers=14)
     cell_matching_dir.mkdir(parents=True, exist_ok=True)
 
     args = [(xenium_dir, ophys_dir, cell_matching_dir, sec, 1000 + sec) for sec in sections]
-    with ProcessPoolExecutor(max_workers=max_workers) as ex:
-        all_tables = list(ex.map(_match_one, args))
+    all_tables = pool_map(_match_one, args, num_cpus)
 
     total = pd.concat(all_tables, axis=0).reset_index(drop=True)
     total.to_csv(cell_matching_dir / f"mouse_{subject_id}_total_matching_results.csv", index=False)

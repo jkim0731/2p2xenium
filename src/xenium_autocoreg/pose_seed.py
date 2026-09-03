@@ -34,16 +34,17 @@ class PoseSeed:
     scale: float
 
 
-def seed_from_auto_search(cfg, sec, max_workers=14, verbose=True):
+def seed_from_auto_search(cfg, sec, num_cpus=None, verbose=True):
     """Mode 1: fully automatic. Runs the blind pose grid (`initial_match.search_anchor_section`),
     then re-derives the final tilt via `tilt_fit.fit_tilt_and_landmarks` (an accumulate+bijective
     landmark procedure -- `search_anchor_section`'s own embedded tilt loop is a simpler
     replace-not-accumulate version, kept there for its own self-contained use but not used for the
-    final result here).
+    final result here). `num_cpus`: see `resources.resolve_num_cpus` (None/0/over-available ->
+    auto; 1 -> serial, no multiprocessing).
 
     Returns dict(M3, R_3d, plane, moving, fixed_aligned, n_landmarks, n_rounds, tilt_deg).
     """
-    result = search_anchor_section(cfg, sec, max_workers=max_workers, verbose=verbose)
+    result = search_anchor_section(cfg, sec, num_cpus=num_cpus, verbose=verbose)
     if result is None:
         raise RuntimeError(f"[{cfg.subject_id}] sec{sec}: automatic pose grid found nothing "
                           f"plausible -- try seed_from_center_rotation with a human-provided pose")

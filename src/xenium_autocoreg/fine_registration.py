@@ -108,13 +108,15 @@ def save_alignment_qc(out_path, zstack_warped_plane, xenium_img_transformed, zst
     plt.close(fig)
 
 
-def register_section(cfg, sec, M, z_base, R_3d, zstack_r, zstack_masks_r, out_dir, rng_seed=None):
+def register_section(cfg, sec, M, z_base, R_3d, zstack_r, zstack_masks_r, out_dir, rng_seed=None,
+                     num_cpus=None):
     """Fine mask-based tile correlation -> TPS warp -> probability cell matching, for one section,
     writing the full canonical output layout under `out_dir`. `M`/`z_base` = this section's
     converged 2D affine + plane (from `chain_refine.run_chain`/`refine_section`, or the anchor's
     own pose for the anchor section itself). `zstack_r`/`zstack_masks_r` = the z-stack intensity/
     segmentation volumes, ALREADY rotated by `R_3d` (rotate once, reuse for every section -- see
-    `chain_refine.run_chain`'s docstring)."""
+    `chain_refine.run_chain`'s docstring). `num_cpus`: forwarded to the tile correlation's
+    `ProcessPoolExecutor` -- see `resources.resolve_num_cpus`."""
     out_dir = Path(out_dir)
     aff_dir = out_dir / "Affine matrices"; aff_dir.mkdir(parents=True, exist_ok=True)
     xen_t_dir = out_dir / "Xenium_affine_transformed"; xen_t_dir.mkdir(parents=True, exist_ok=True)
@@ -145,7 +147,7 @@ def register_section(cfg, sec, M, z_base, R_3d, zstack_r, zstack_masks_r, out_di
     zstack_masks_bin = (zstack_masks_r > 0).astype(np.uint8)
     zyx_xen, zyx_zst, best_corrs, _ = tile_based_warping(
         xen_masks_bin, zstack_masks_bin, z_base=z_base, margin=MARGIN,
-        tile_size=FINE_TILE_SIZE, overlap=FINE_OVERLAP, max_shift=FINE_MAX_SHIFT)
+        tile_size=FINE_TILE_SIZE, overlap=FINE_OVERLAP, max_shift=FINE_MAX_SHIFT, num_cpus=num_cpus)
     best_corrs = np.nan_to_num(np.array(best_corrs))
 
     table = _post_affine_table(zyx_xen, zyx_zst, best_corrs)

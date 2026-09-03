@@ -18,10 +18,10 @@ import numpy as np
 import pandas as pd
 import tifffile as tiff
 from pathlib import Path
-from concurrent.futures import ProcessPoolExecutor
 from scipy.interpolate import Rbf
 from skimage.measure import regionprops_table
 from .reference_ported import get_2d_to_3d_transform_func
+from .resources import pool_map
 
 
 def write_zstack_mask_properties(cfg, out_path):
@@ -84,9 +84,9 @@ def _map_one(args):
     return map_section_to_3d(cfg, sec, out_dir, zstack_shape)
 
 
-def run_transform_xenium_points(cfg, out_dir, sections, max_workers=14):
+def run_transform_xenium_points(cfg, out_dir, sections, num_cpus=None):
     """Each section maps independently (its own post_affine_warping table + affine) --
-    parallelized across sections."""
+    parallelized across sections. `num_cpus`: see `resources.resolve_num_cpus`."""
     out_dir = Path(out_dir)
     (out_dir / "mapped_3d_coordinates").mkdir(parents=True, exist_ok=True)
 
@@ -98,8 +98,7 @@ def run_transform_xenium_points(cfg, out_dir, sections, max_workers=14):
         zstack_shape = (len(tf.pages),) + tf.pages[0].shape
 
     args = [(cfg, sec, out_dir, zstack_shape) for sec in sections]
-    with ProcessPoolExecutor(max_workers=max_workers) as ex:
-        all_dfs = [d for d in ex.map(_map_one, args) if d is not None]
+    all_dfs = [d for d in pool_map(_map_one, args, num_cpus) if d is not None]
 
     if all_dfs:
         total = pd.concat(all_dfs, axis=0).reset_index(drop=True)

@@ -143,6 +143,12 @@ above) -- e.g.:
 ```
 (`"scale"` is optional -- defaults to the subject's own `zstack_scale_to_Xenium` if omitted.)
 
+`--num-cpus N` controls worker-process count for every parallelized stage (the auto pose-grid
+search, the per-section fine-registration tile correlation, cell-centroid extraction, and 3D point
+mapping) -- see `resources.resolve_num_cpus`: blank/`0`/`N` greater than this machine's CPU count
+= auto (every available core); `N=1` = serial, no multiprocessing at all (useful for debugging, or
+a resource-constrained environment where spawning many worker processes gets silently killed).
+
 `seed.json` for `corners` (mode 3 -- see "Known limitations", not yet implemented):
 ```json
 {"xenium_trapezoid_corners_um": [[0, 0], [2000, 50], [1980, 1800], [-20, 1750]], "top_edge": 0}
