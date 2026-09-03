@@ -171,7 +171,30 @@ def _parse_points(s, n):
     return [(vals[i], vals[i + 1]) for i in range(0, 2 * n, 2)]
 
 
+_COORD_FLAGS = ("--center-um", "--xenium-trapezoid-corners-um", "--zstack-corners-um")
+
+
+def _fix_negative_coord_tokens(argv):
+    """Rewrite `--flag value` to `--flag=value` for the comma-joined coordinate flags, so a value
+    starting with a minus sign (e.g. `-50,-100`) isn't misparsed by argparse as a new option --
+    argparse's own negative-number heuristic only recognizes a bare `-123`/`-1.5`, not a
+    comma-separated list, so `--center-um -50,-100` would otherwise fail with 'expected one
+    argument' before this module's own validation ever runs."""
+    out = []
+    i = 0
+    while i < len(argv):
+        tok = argv[i]
+        if tok in _COORD_FLAGS and i + 1 < len(argv):
+            out.append(f"{tok}={argv[i + 1]}")
+            i += 2
+        else:
+            out.append(tok)
+            i += 1
+    return out
+
+
 def main(argv=None):
+    argv = _fix_negative_coord_tokens(sys.argv[1:] if argv is None else argv)
     p = argparse.ArgumentParser(prog="xenium-autocoreg")
     p.add_argument("config", help="path to a SubjectConfig JSON file (see config.subject_config_from_json)")
     p.add_argument("out_dir")
@@ -192,7 +215,7 @@ def main(argv=None):
     p.add_argument("--pose-json", default=None, help="JSON file alternative to the inline flags above")
     args = p.parse_args(argv)
 
-    center_um = tuple(float(v) for v in args.center_um.split(",")) if args.center_um else None
+    center_um = _parse_points(args.center_um, 1)[0] if args.center_um else None
     rotation_deg, scale = args.rotation_deg, args.scale
     xenium_trapezoid_corners_um = (_parse_points(args.xenium_trapezoid_corners_um, 4)
                                    if args.xenium_trapezoid_corners_um else None)
