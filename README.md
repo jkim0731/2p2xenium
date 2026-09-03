@@ -112,22 +112,42 @@ cfg = SubjectConfig(
     zstack_scale_to_Xenium=0.82,      # override if your tissue prep differs from the default
 )
 ```
-`config.resolve_subject` is an OPTIONAL convenience resolver for one lab's Code-Ocean-style mounted
--asset naming convention (glob patterns over `$XENIUM_AUTOCOREG_DATA_ROOT`, default `/data`) --
-skip it entirely for any other layout.
+or load one from a plain JSON file with the same field names via `config.subject_config_from_json`
+(see the `xenium-autocoreg` CLI below, which takes exactly this JSON as its first argument).
+
+This package does not implement any lab-specific data-asset resolver (e.g. globbing a CodeOcean
+capsule's mounted-asset naming convention into a `SubjectConfig`) -- write that resolver in your
+own pipeline/capsule instead. See
+[`ophys-xenium-autocoreg`](https://github.com/AllenNeuralDynamics/ophys-xenium-autocoreg) for a
+reference implementation (a CodeOcean capsule wrapping this package, with its own
+`subject_resolver.py`).
 
 ## Run
 
 ```bash
-xenium-autocoreg <subject_id> /path/to/out --pose-mode auto
-xenium-autocoreg <subject_id> /path/to/out --pose-mode center-rotation --center-um 1200.0,1500.0 --rotation-deg 10.0
-xenium-autocoreg <subject_id> /path/to/out --pose-mode center-rotation --pose-json seed.json
+xenium-autocoreg <config.json> /path/to/out --pose-mode auto
+xenium-autocoreg <config.json> /path/to/out --pose-mode center-rotation --center-um 1200.0,1500.0 --rotation-deg 10.0
+xenium-autocoreg <config.json> /path/to/out --pose-mode center-rotation --pose-json seed.json
+xenium-autocoreg <config.json> /path/to/out --pose-mode corners --xenium-trapezoid-corners-um 0,0,2000,50,1980,1800,-20,1750 --top-edge 0   # NOT YET IMPLEMENTED, see "Known limitations"
+```
+`<config.json>` matches `SubjectConfig`'s own field names (see `config.subject_config_from_json`
+above) -- e.g.:
+```json
+{"subject_id": 816462, "aligned_dir": "/data/aligned_816462",
+ "zstack_registered_tif": "/data/zstack_816462_registered.tif",
+ "zstack_segmented_tif": "/data/zstack_816462_segmented.tif", "zstack_xy_um": 1.367}
 ```
 `seed.json` for `center-rotation`:
 ```json
 {"center_um": [1200.0, 1500.0], "rotation_deg": 10.0, "scale": 0.80}
 ```
 (`"scale"` is optional -- defaults to the subject's own `zstack_scale_to_Xenium` if omitted.)
+
+`seed.json` for `corners` (mode 3 -- see "Known limitations", not yet implemented):
+```json
+{"xenium_trapezoid_corners_um": [[0, 0], [2000, 50], [1980, 1800], [-20, 1750]], "top_edge": 0}
+```
+(`"zstack_corners_um"` and `"scale"` are optional -- see `pose_seed.seed_from_corners`'s docstring.)
 
 ## Output structure
 
@@ -223,10 +243,11 @@ print(result['plane'], result['n_landmarks'], result['tilt_deg'])
 # compare against metadata.json's validated_test_cases.mode1_auto_search.result
 "
 ```
-Note: the CLI's `run_subject()` currently always resolves its config via `resolve_subject(subject_id)`
-(the mounted-asset convention), so it can't yet be pointed at an arbitrary `SubjectConfig` -- use
-the lower-level stage functions (`pose_seed`, `chain_refine`, `fine_registration`, ...) directly
-against the fixture's own `SubjectConfig`, as above, rather than the `xenium-autocoreg` command.
+Note: `run_subject`/the `xenium-autocoreg` CLI now take an arbitrary `SubjectConfig` (or a JSON
+file matching its fields, via `config.subject_config_from_json`) directly, so you can also drive
+the fixture through the full CLI/`run_subject` path -- write the fixture's fields out as a
+`config.json` (or call `run_subject(cfg, ...)` directly with the `SubjectConfig` built above)
+instead of only the lower-level stage functions shown here.
 `metadata.json`'s `z_base_in_cropped_volume` (NOT `z_base_original`) is the correct `z_base` for
 this cropped volume. Either pose-seeding mode should reproduce the exact
 `plane`/`n_landmarks`/`tilt_deg` recorded in `metadata.json`'s `validated_test_cases` -- if it
@@ -238,9 +259,12 @@ doesn't, that's a real regression.
   weak-correlation section can still show shear-driven cell-shape distortion.
 - `auto` pose-seeding can fail outright (see `pose_seed.seed_from_auto_search`'s docstring) if the
   true pose sits outside the searched position window; use `center-rotation` when it does.
-- `corners` pose-seeding is not implemented -- see `pose_seed.seed_from_corners`.
-- `config.resolve_subject` is an optional convenience for one lab's mounted-asset naming
-  convention, not a general data loader -- construct `SubjectConfig` directly for anything else.
-  Its fallback field-of-view assumption (used only when no acquisition metadata file can be found)
-  is itself an explicit, overridable parameter (`fallback_fov_um`/`fallback_native_px`), not a
-  silent default.
+- `corners` pose-seeding is not implemented -- see `pose_seed.seed_from_corners`. Its parameters
+  (`xenium_trapezoid_corners_um`, `top_edge`, `zstack_corners_um`) are already wired through
+  `run_subject`/the CLI/`--pose-json`, so implementing it needs no caller-side changes.
+- This package does not resolve `SubjectConfig` from any mounted-asset naming convention itself
+  (`config.subject_config_from_json` is a generic "JSON matching the dataclass fields" loader, not
+  a data-asset resolver) -- write a resolver in your own pipeline/capsule for that. See
+  [`ophys-xenium-autocoreg`](https://github.com/AllenNeuralDynamics/ophys-xenium-autocoreg)'s
+  `subject_resolver.py` for a reference implementation (including its own fallback
+  field-of-view handling for acquisitions with no metadata file).
