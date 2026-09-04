@@ -240,7 +240,7 @@ def main(argv=None):
     zstack_scale_to_xenium = args.zstack_scale_to_xenium
 
     if args.pose_json:
-        data = json.load(open(args.pose_json))
+        data = json.loads(Path(args.pose_json).read_text())
         center_um = tuple(data["center_um"]) if "center_um" in data else center_um
         rotation_deg = data.get("rotation_deg", rotation_deg)
         zstack_scale_to_xenium = data.get("zstack_scale_to_xenium", zstack_scale_to_xenium)
