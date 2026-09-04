@@ -84,9 +84,9 @@ def _map_one(args):
     return map_section_to_3d(cfg, sec, out_dir, zstack_shape)
 
 
-def run_transform_xenium_points(cfg, out_dir, sections, num_cpus=None):
+def run_transform_xenium_points(cfg, out_dir, sections, num_cpus=None, reserve_cpus=0):
     """Each section maps independently (its own post_affine_warping table + affine) --
-    parallelized across sections. `num_cpus`: see `resources.resolve_num_cpus`."""
+    parallelized across sections. `num_cpus`/`reserve_cpus`: see `resources.resolve_num_cpus`."""
     out_dir = Path(out_dir)
     (out_dir / "mapped_3d_coordinates").mkdir(parents=True, exist_ok=True)
 
@@ -98,7 +98,7 @@ def run_transform_xenium_points(cfg, out_dir, sections, num_cpus=None):
         zstack_shape = (len(tf.pages),) + tf.pages[0].shape
 
     args = [(cfg, sec, out_dir, zstack_shape) for sec in sections]
-    all_dfs = [d for d in pool_map(_map_one, args, num_cpus) if d is not None]
+    all_dfs = [d for d in pool_map(_map_one, args, num_cpus, reserve_cpus=reserve_cpus) if d is not None]
 
     if all_dfs:
         total = pd.concat(all_dfs, axis=0).reset_index(drop=True)

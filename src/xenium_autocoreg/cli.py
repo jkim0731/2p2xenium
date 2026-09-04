@@ -37,9 +37,13 @@ measured OUTPUT of the registration, not a knob.
     optional -- defaults to the subject's own SubjectConfig.zstack_scale_to_Xenium if omitted)
 
 `--num-cpus N` controls worker-process count for every parallelized stage (see
-`resources.resolve_num_cpus`): blank/0/N > this machine's CPU count -> auto (every available
+`resources.resolve_num_cpus`): blank/0/N > this machine's usable CPU count -> auto (every usable
 core); N=1 -> serial, no multiprocessing at all (useful for debugging, or a resource-constrained
 sandbox where spawning many worker processes gets silently killed).
+
+`--reserve-cpus N` (default 0) withholds N cores from "usable" for every one of those stages --
+set it > 0 in a shared/orchestrated environment where saturating every physical core starves the
+host/orchestration process itself.
 """
 from __future__ import annotations
 import argparse
@@ -83,13 +87,14 @@ def _centroids_one(args):
             cdir / f"section_{sec}_ophys_centroids.csv", index=False)
 
 
-def write_cell_centroids(cfg, out_dir, sections, num_cpus=None):
+def write_cell_centroids(cfg, out_dir, sections, num_cpus=None, reserve_cpus=0):
     (Path(out_dir) / "cell_centroids").mkdir(parents=True, exist_ok=True)
-    pool_map(_centroids_one, [(cfg, out_dir, s) for s in sections], num_cpus)
+    pool_map(_centroids_one, [(cfg, out_dir, s) for s in sections], num_cpus, reserve_cpus=reserve_cpus)
 
 
 def run_subject(cfg, out_dir, pose_mode="auto", anchor_sec=None, center_um=None,
-                rotation_deg=None, zstack_scale_to_xenium=None, num_cpus=None, verbose=True):
+                rotation_deg=None, zstack_scale_to_xenium=None, num_cpus=None, reserve_cpus=0,
+                verbose=True):
     """Run the full pipeline for one subject, given its `SubjectConfig` (`cfg`) -- see the module
     docstring for how to obtain one (directly, or via `config.subject_config_from_json`).
 
@@ -110,8 +115,13 @@ def run_subject(cfg, out_dir, pose_mode="auto", anchor_sec=None, center_um=None,
 
     `num_cpus`: worker-process count for every parallelized stage (the auto pose-grid search, the
     per-section fine-registration tile correlation, cell-centroid extraction, and 3D point
-    mapping). See `resources.resolve_num_cpus`: None/0/a value exceeding this machine's CPU count
-    -> auto (every available core); 1 -> serial, no multiprocessing at all.
+    mapping). See `resources.resolve_num_cpus`: None/0/a value at or exceeding this machine's usable
+    CPU count -> auto (every usable core); 1 -> serial, no multiprocessing at all.
+
+    `reserve_cpus`: how many cores to withhold from "usable" for every one of those stages (default
+    0 -- usable == every physical core). Set > 0 in a shared/orchestrated environment where
+    saturating every core starves the host/orchestration process itself. See
+    `resources.resolve_num_cpus`.
     """
     def log(msg):
         if verbose:
@@ -128,7 +138,8 @@ def run_subject(cfg, out_dir, pose_mode="auto", anchor_sec=None, center_um=None,
     log(f"[{subject_id}] pose-seed mode={pose_mode}, anchor section={anchor_sec}, "
         f"zstack_scale_to_Xenium={cfg.zstack_scale_to_Xenium}")
     if pose_mode == "auto":
-        seed_result = ps.seed_from_auto_search(cfg, anchor_sec, num_cpus=num_cpus, verbose=verbose)
+        seed_result = ps.seed_from_auto_search(cfg, anchor_sec, num_cpus=num_cpus,
+                                               reserve_cpus=reserve_cpus, verbose=verbose)
     elif pose_mode == "center-rotation":
         seed = ps.seed_from_center_rotation(center_um, rotation_deg, cfg=cfg)
         seed_result = ps.refine_from_seed(cfg, anchor_sec, seed, verbose=verbose)
@@ -145,7 +156,7 @@ def run_subject(cfg, out_dir, pose_mode="auto", anchor_sec=None, center_um=None,
     log(f"[{subject_id}] stage: chain_refine coarse propagation across {len(cfg.sections)} sections")
     chain_dir = out_dir / "_chain_internal"
     chain_results = run_chain(cfg, anchor_sec, anchor_M, anchor_z, chain_dir, sections=cfg.sections,
-                              R_3d=R_3d, num_cpus=num_cpus)
+                              R_3d=R_3d, num_cpus=num_cpus, reserve_cpus=reserve_cpus)
     sections = [r["sec"] for r in chain_results]
     log(f"[{subject_id}] chain covers sections: {sections}")
 
@@ -163,7 +174,7 @@ def run_subject(cfg, out_dir, pose_mode="auto", anchor_sec=None, center_um=None,
         sec = rec["sec"]
         M = np.load(chain_dir / f"section_{sec}_affine.npy")
         summary.append(register_section(cfg, sec, M, rec["z_base"], R_3d, zstack_r, zstack_masks_r,
-                                        out_dir, num_cpus=num_cpus))
+                                        out_dir, num_cpus=num_cpus, reserve_cpus=reserve_cpus))
     json.dump(summary, open(out_dir / "propagation_summary.json", "w"), indent=2)
 
     log(f"[{subject_id}] stage: concatenated cell_matching_probability totals")
@@ -173,10 +184,10 @@ def run_subject(cfg, out_dir, pose_mode="auto", anchor_sec=None, center_um=None,
         cmp_dir / f"mouse_{subject_id}_total_matching_results.csv", index=False)
 
     log(f"[{subject_id}] stage: cell_centroids")
-    write_cell_centroids(cfg, out_dir, sections, num_cpus=num_cpus)
+    write_cell_centroids(cfg, out_dir, sections, num_cpus=num_cpus, reserve_cpus=reserve_cpus)
 
     log(f"[{subject_id}] stage: transform_xenium_points")
-    run_transform_xenium_points(cfg, out_dir, sections, num_cpus=num_cpus)
+    run_transform_xenium_points(cfg, out_dir, sections, num_cpus=num_cpus, reserve_cpus=reserve_cpus)
 
     log(f"[{subject_id}] DONE -> {out_dir}")
     return summary
@@ -230,9 +241,14 @@ def main(argv=None):
                        "Blank (default) = use the subject's own configured value.")
     p.add_argument("--pose-json", default=None, help="JSON file alternative to the inline flags above")
     p.add_argument("--num-cpus", type=int, default=None,
-                  help="worker-process count for every parallelized stage. Blank/0/a value "
-                       "exceeding this machine's CPU count = auto (every available core); "
+                  help="worker-process count for every parallelized stage. Blank/0/a value at or "
+                       "exceeding this machine's usable CPU count = auto (every usable core); "
                        "1 = serial, no multiprocessing at all. See resources.resolve_num_cpus.")
+    p.add_argument("--reserve-cpus", type=int, default=0,
+                  help="OPTIONAL: how many cores to withhold from \"usable\" for every "
+                       "parallelized stage (default 0 = every physical core is usable). Set > 0 "
+                       "in a shared/orchestrated environment where saturating every core starves "
+                       "the host/orchestration process itself. See resources.resolve_num_cpus.")
     args = p.parse_args(argv)
 
     center_um = _parse_points(args.center_um, 1)[0] if args.center_um else None
@@ -248,7 +264,8 @@ def main(argv=None):
     cfg = subject_config_from_json(args.config)
     run_subject(cfg, args.out_dir, pose_mode=args.pose_mode, anchor_sec=args.anchor_sec,
                center_um=center_um, rotation_deg=rotation_deg,
-               zstack_scale_to_xenium=zstack_scale_to_xenium, num_cpus=args.num_cpus)
+               zstack_scale_to_xenium=zstack_scale_to_xenium, num_cpus=args.num_cpus,
+               reserve_cpus=args.reserve_cpus)
 
 
 if __name__ == "__main__":

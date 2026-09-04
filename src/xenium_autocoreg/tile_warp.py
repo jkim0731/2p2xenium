@@ -62,7 +62,8 @@ def _one_tile(y0x0):
 
 
 def tile_based_warping_parallel(img, vol, z_base, margin=5, tile_size=(64, 64),
-                                overlap=0.4, max_shift=(10, 20, 20), num_cpus=None, **_ignore):
+                                overlap=0.4, max_shift=(10, 20, 20), num_cpus=None, reserve_cpus=0,
+                                **_ignore):
     """Same signature/outputs as coreg.tile_warp.tile_based_warping (drops the `progress` kwarg;
     absorbed by **_ignore for call-compatibility), parallelized over tiles via ProcessPoolExecutor
     (or run serially if `num_cpus` resolves to that -- see `resources.resolve_num_cpus`)."""
@@ -80,7 +81,8 @@ def tile_based_warping_parallel(img, vol, z_base, margin=5, tile_size=(64, 64),
     n = len(tile_starts)
 
     img_f = img.astype(np.float64)
-    out = pool_map(_one_tile, [tuple(p) for p in tile_starts], num_cpus, initializer=_pool_init,
+    out = pool_map(_one_tile, [tuple(p) for p in tile_starts], num_cpus, reserve_cpus=reserve_cpus,
+                  initializer=_pool_init,
                   initargs=(img_f, vol, tuple(tile_size), tuple(max_shift), z_base), chunksize=4)
 
     best_corrs = np.array([o[0] for o in out])

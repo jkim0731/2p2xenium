@@ -157,10 +157,11 @@ def _match_one(args):
                                       rng=np.random.default_rng(seed))
 
 
-def run_cell_matching_probability(subject_id, out_dir, sections, num_cpus=None):
+def run_cell_matching_probability(subject_id, out_dir, sections, num_cpus=None, reserve_cpus=0):
     """Each section is independent (its own random-shift null model) -- parallelized across
     sections. A per-section seed (derived from the section number) keeps results reproducible
-    regardless of worker scheduling order. `num_cpus`: see `resources.resolve_num_cpus`."""
+    regardless of worker scheduling order. `num_cpus`/`reserve_cpus`: see
+    `resources.resolve_num_cpus`."""
     out_dir = Path(out_dir)
     xenium_dir = out_dir / "Xenium_affine_transformed"
     ophys_dir = out_dir / "warped_zstacks"
@@ -168,7 +169,7 @@ def run_cell_matching_probability(subject_id, out_dir, sections, num_cpus=None):
     cell_matching_dir.mkdir(parents=True, exist_ok=True)
 
     args = [(xenium_dir, ophys_dir, cell_matching_dir, sec, 1000 + sec) for sec in sections]
-    all_tables = pool_map(_match_one, args, num_cpus)
+    all_tables = pool_map(_match_one, args, num_cpus, reserve_cpus=reserve_cpus)
 
     total = pd.concat(all_tables, axis=0).reset_index(drop=True)
     total.to_csv(cell_matching_dir / f"mouse_{subject_id}_total_matching_results.csv", index=False)
