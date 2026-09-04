@@ -18,10 +18,9 @@ from dataclasses import dataclass
 import numpy as np
 
 from . import somaprint as sp2, bigwarp
-from .geometry import find_affine_transformation_2d
 from .populations import load_zstack_cells, load_xenium_cells
 from .reference_ported import find_min_z_spread_rotation
-from .initial_match import make_seed, _aff, K, N_BEST, SLAB_HALF, R_CAND, search_anchor_section
+from .initial_match import make_seed, K, N_BEST, SLAB_HALF, R_CAND, search_anchor_section
 from .tilt_fit import fit_tilt_and_landmarks
 
 DEPTH_SWEEP_PLANES = list(range(60, 341, 20))
@@ -87,21 +86,16 @@ def refine_from_seed(cfg, sec, seed, plane_range=None, verbose=True):
             continue
         seed_fn = make_seed(seed.rotation_deg, slab.mean(0), np.asarray(seed.center_um), seed.scale)
         res = sp2.register_full(slab, xen_xy, seed_fn, R_cand=R_CAND, k_cz=K, k_xen=K, n_best=N_BEST, max_rounds=3)
-        if len(res["anchors"]) < 6:
+        cert = res["certified"]
+        if len(cert) < 6:
             log(f"[{cfg.subject_id}] sec{sec} depth sweep: plane~{st + SLAB_HALF} n_anchors={len(res['anchors'])}")
             continue
-        # M0 here maps z-stack(x,y) -> Xenium(x,y) (fit directly on the um point clouds, for
+        # res["affine"] maps z-stack(x,y) -> Xenium(x,y) (fit directly on the um point clouds, for
         # internal soma-print matching use only) -- NOT the same convention as the official
         # M3 (Xenium(row,col) -> z-stack(row,col), from bigwarp.affine_from_landmarks) that
         # fit_tilt_and_landmarks expects. Rebuild the proper M3 from the certified landmarks
-        # below rather than reusing M0 directly -- passing M0 as-is silently breaks the
-        # downstream tilt fit (wrong direction AND wrong coordinate order).
-        M0 = find_affine_transformation_2d(slab[res["anchors"][:, 0]], xen_xy[res["anchors"][:, 1]])
-        r = sp2.match(slab, xen_xy, lambda p: _aff(M0, p), R_cand=30.0, n_best=N_BEST, anchor_frac=0.8,
-                      k_cz=K, k_xen=K, max_rounds=3)
-        cert = r["accepted"]
-        if len(cert) >= 9:
-            cert = sp2.flow_filter(cert, _aff(M0, slab)[cert[:, 0]], xen_xy)
+        # below rather than reusing res["affine"] directly -- passing it as-is silently breaks
+        # the downstream tilt fit (wrong direction AND wrong coordinate order).
         log(f"[{cfg.subject_id}] sec{sec} depth sweep: plane~{st + SLAB_HALF} n_cert={len(cert)}")
         if best is None or len(cert) > best[1]:
             best = (st, len(cert), slab, pl_slab, cert)

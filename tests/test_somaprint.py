@@ -1,5 +1,5 @@
 import numpy as np
-from xenium_autocoreg.somaprint import match
+from xenium_autocoreg.somaprint import match, register_full
 
 
 def _rigid_seed(rot_deg, scale, t):
@@ -37,3 +37,36 @@ def test_match_recovers_correspondence_under_known_rigid_transform_and_noise():
     assert len(accepted) >= int(0.5 * n), f"only {len(accepted)}/{n} accepted"
     correct = np.sum(accepted[:, 0] == accepted[:, 1])
     assert correct / len(accepted) >= 0.9, f"only {correct}/{len(accepted)} correct correspondences"
+
+
+def test_register_full_certified_recovers_most_correspondence_under_known_transform():
+    rng = np.random.default_rng(7)
+    n = 90
+    cz_xy = rng.uniform(0, 300, size=(n, 2))
+
+    rot_deg, scale, t = 7.0, 0.8, np.array([45.0, -15.0])
+    true_seed = _rigid_seed(rot_deg, scale, t)
+    xen_xy_true = true_seed(cz_xy)
+    xen_xy = xen_xy_true + rng.normal(0, 1.0, size=xen_xy_true.shape)
+    clutter = rng.uniform(xen_xy.min(0), xen_xy.max(0), size=(20, 2))
+    xen_xy_full = np.vstack([xen_xy, clutter])
+
+    seed_fn = _rigid_seed(rot_deg + 2.0, scale * 1.03, t + np.array([4.0, -3.0]))
+    out = register_full(
+        cz_xy,
+        xen_xy_full,
+        seed_fn,
+        R_cand=50.0,
+        anchor_frac=0.6,
+        tight_R_cand=25.0,
+        tight_anchor_frac=0.8,
+        k_cz=10,
+        k_xen=10,
+        n_best=5,
+        min_anchors=6,
+    )
+
+    certified = out["certified"]
+    assert len(certified) >= int(0.6 * n), f"only {len(certified)}/{n} certified"
+    correct = np.sum(certified[:, 0] == certified[:, 1])
+    assert correct / len(certified) >= 0.9, f"only {correct}/{len(certified)} certified correspondences correct"

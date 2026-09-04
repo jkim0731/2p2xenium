@@ -217,38 +217,32 @@ def quality(result, cz_xy0, xen_xy, seed):
     return dict(n=len(acc), spread=spread, loo_um=loo_um, score=float(len(acc)))
 
 
-# ───────── whole-FOV expansion ─────────
-def expand_by_affine_nn(anchors, cz_xy, xen_xy, nn_radius_um=12.0, flow_tol_um=30.0):
-    """Expand a clustered set of reliable anchors to the WHOLE FOV. The soma-print matcher only
-    fires where the local pattern is distinctive (a minority of the FOV), but those anchors
-    determine a globally accurate 2D affine. So: fit a global affine from the anchors, then assign
-    every CZ cell to its nearest Xenium cell within `nn_radius_um` of its affine-predicted
-    position, and apply the local optical-flow filter.
+def register_full(cz_xy, xen_xy, seed, R_cand=100.0, anchor_frac=0.6, tight_R_cand=30.0,
+                  tight_anchor_frac=0.8, flow=True, min_anchors=6, **match_kw):
+    """Pose certification -- the recipe every pose-seeding/tilt-fitting caller in this package
+    actually uses:
+      1. soma-print `match` (lenient gate, wide `R_cand`) -> mutual-best + anchor-vote anchors,
+      2. local optical-flow filter -> reliable anchors (false positives removed),
+      3. fit a global 2D affine from those anchors, then re-run soma-print `match` seeded by that
+         affine with a much TIGHTER `tight_R_cand` (now that the seed is good, a small residual
+         search radius is both sufficient and more selective) -> the certified landmark set.
 
-    anchors : (K,2) [cz_idx, xen_idx]   cz_xy : (N,2) µm (CZ slab, ORIGINAL frame)   xen_xy : (M,2) µm
-    Returns (P,2) [cz_idx, xen_idx] expanded matches, and the 3x3 affine (CZ→Xenium)."""
+    Returns dict(anchors, affine, certified). `anchors`/`certified` are (K,2) [cz_idx, xen_idx]
+    arrays; `certified` is empty if fewer than `min_anchors` anchors were found (too few to fit a
+    reliable affine). `cz_xy`=(N,2) CZ slab µm, `seed`=warm-start callable."""
     from .geometry import find_affine_transformation_2d
-    anchors = np.asarray(anchors)
-    if len(anchors) < 3:
-        return anchors, None
-    M = find_affine_transformation_2d(cz_xy[anchors[:, 0]], xen_xy[anchors[:, 1]])   # CZ µm -> Xenium µm
-    pred = (M @ np.hstack([cz_xy, np.ones((len(cz_xy), 1))]).T).T[:, :2]
-    dnn, idx = cKDTree(xen_xy).query(pred, k=1)
-    keep = dnn < nn_radius_um
-    pairs = np.column_stack([np.where(keep)[0], idx[keep]])
-    pairs = flow_filter(pairs, pred[pairs[:, 0]], xen_xy, tol_um=flow_tol_um)
-    return pairs, M
-
-
-def register_full(cz_xy, xen_xy, seed, anchor_frac=0.6, flow=True, **match_kw):
-    """End-to-end whole-FOV registration (the validated recipe):
-      1. soma-print `match` (lenient gate) → mutual-best + anchor-vote anchors,
-      2. local optical-flow filter → reliable anchors (false positives removed),
-      3. `expand_by_affine_nn` → global affine + nearest-neighbour expansion + flow filter.
-    Returns dict(anchors, matches, affine). `cz_xy`=(N,2) CZ slab µm, `seed`=warm-start callable."""
-    r = match(cz_xy, xen_xy, seed, anchor_frac=anchor_frac, **match_kw)
+    r = match(cz_xy, xen_xy, seed, R_cand=R_cand, anchor_frac=anchor_frac, **match_kw)
     anc = r["accepted"]
     if flow and len(anc) >= 9:
         anc = flow_filter(anc, np.asarray(seed(cz_xy))[anc[:, 0]], xen_xy)
-    matches, M = expand_by_affine_nn(anc, cz_xy, xen_xy)
-    return dict(anchors=anc, matches=matches, affine=M)
+    if len(anc) < min_anchors:
+        return dict(anchors=anc, affine=None, certified=np.zeros((0, 2), int))
+    M0 = find_affine_transformation_2d(cz_xy[anc[:, 0]], xen_xy[anc[:, 1]])
+
+    def seeded(p):
+        return _affine_apply(M0, np.asarray(p))
+    r2 = match(cz_xy, xen_xy, seeded, R_cand=tight_R_cand, anchor_frac=tight_anchor_frac, **match_kw)
+    cert = r2["accepted"]
+    if flow and len(cert) >= 9:
+        cert = flow_filter(cert, seeded(cz_xy)[cert[:, 0]], xen_xy)
+    return dict(anchors=anc, affine=M0, certified=cert)
