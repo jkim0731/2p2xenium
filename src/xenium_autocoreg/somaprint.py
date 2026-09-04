@@ -217,36 +217,6 @@ def quality(result, cz_xy0, xen_xy, seed):
     return dict(n=len(acc), spread=spread, loo_um=loo_um, score=float(len(acc)))
 
 
-# ───────── whole-FOV expansion (standalone utility -- NOT used by `register_full`) ─────────
-def expand_by_affine_nn(anchors, cz_xy, xen_xy, nn_radius_um=12.0, flow_tol_um=30.0):
-    """Expand a clustered set of reliable anchors to the WHOLE FOV by plain nearest-neighbour
-    assignment: fit a global affine from the anchors, then assign every CZ cell to its nearest
-    Xenium cell within `nn_radius_um` of its affine-predicted position, and apply the local
-    optical-flow filter.
-
-    This is a coverage-oriented tool, not a precision one: with real Xenium cell spacing (~8-9um),
-    plain nearest-neighbour cannot always tell the true partner from an adjacent cell -- on the
-    data this was validated against, ~94% single-cell (<=10um) precision vs. 100% at a coarser
-    neighbourhood (<=30um) tolerance. It is NOT called by `register_full` (see its own docstring
-    for why) and nothing in this package's pose-seeding/tilt-fitting path uses its output --
-    reach for it directly only when whole-FOV coverage matters more than single-cell precision
-    (e.g. a downstream analysis that tolerates the ~5-6% adjacent-cell error rate).
-
-    anchors : (K,2) [cz_idx, xen_idx]   cz_xy : (N,2) µm (CZ slab, ORIGINAL frame)   xen_xy : (M,2) µm
-    Returns (P,2) [cz_idx, xen_idx] expanded matches, and the 3x3 affine (CZ→Xenium)."""
-    from .geometry import find_affine_transformation_2d
-    anchors = np.asarray(anchors)
-    if len(anchors) < 3:
-        return anchors, None
-    M = find_affine_transformation_2d(cz_xy[anchors[:, 0]], xen_xy[anchors[:, 1]])   # CZ µm -> Xenium µm
-    pred = (M @ np.hstack([cz_xy, np.ones((len(cz_xy), 1))]).T).T[:, :2]
-    dnn, idx = cKDTree(xen_xy).query(pred, k=1)
-    keep = dnn < nn_radius_um
-    pairs = np.column_stack([np.where(keep)[0], idx[keep]])
-    pairs = flow_filter(pairs, pred[pairs[:, 0]], xen_xy, tol_um=flow_tol_um)
-    return pairs, M
-
-
 def register_full(cz_xy, xen_xy, seed, R_cand=100.0, anchor_frac=0.6, tight_R_cand=30.0,
                   tight_anchor_frac=0.8, flow=True, min_anchors=6, **match_kw):
     """Pose certification -- the recipe every pose-seeding/tilt-fitting caller in this package
@@ -256,13 +226,6 @@ def register_full(cz_xy, xen_xy, seed, R_cand=100.0, anchor_frac=0.6, tight_R_ca
       3. fit a global 2D affine from those anchors, then re-run soma-print `match` seeded by that
          affine with a much TIGHTER `tight_R_cand` (now that the seed is good, a small residual
          search radius is both sufficient and more selective) -> the certified landmark set.
-
-    This does NOT do a nearest-neighbour whole-FOV expansion -- see `expand_by_affine_nn` for that
-    separate, opt-in, coverage-oriented tool (it trades single-cell precision for coverage; its
-    own docstring has the numbers). An earlier version of this function called it as a 3rd step,
-    but no caller ever used that output -- every real caller fit its own affine from step 1-2's
-    anchors and re-ran a tightened `match` directly, duplicating steps 1-2's work. This function
-    now does exactly that, once, so callers don't have to.
 
     Returns dict(anchors, affine, certified). `anchors`/`certified` are (K,2) [cz_idx, xen_idx]
     arrays; `certified` is empty if fewer than `min_anchors` anchors were found (too few to fit a
