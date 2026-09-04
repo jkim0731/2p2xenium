@@ -240,8 +240,7 @@ def register_full(cz_xy, xen_xy, seed, R_cand=100.0, anchor_frac=0.6, tight_R_ca
     M0 = find_affine_transformation_2d(cz_xy[anc[:, 0]], xen_xy[anc[:, 1]])
 
     def seeded(p):
-        return (M0 @ np.hstack([p, np.ones((len(p), 1))]).T).T[:, :2]
-
+        return _affine_apply(M0, np.asarray(p))
     r2 = match(cz_xy, xen_xy, seeded, R_cand=tight_R_cand, anchor_frac=tight_anchor_frac, **match_kw)
     cert = r2["accepted"]
     if flow and len(cert) >= 9:
