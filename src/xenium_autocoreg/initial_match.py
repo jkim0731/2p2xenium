@@ -7,7 +7,7 @@ import numpy as np
 import tifffile as tiff
 from . import somaprint as sp2, bigwarp
 from .resources import pool_map
-from .geometry import find_affine_transformation_2d, decompose_affine
+from .geometry import decompose_affine
 from .populations import load_zstack_cells, load_xenium_cells
 from .reference_ported import find_min_z_spread_rotation
 
@@ -80,16 +80,7 @@ def _rank_combo(args):
         return (st, rot, off, 0, 0)
     seed = make_seed(rot, slab.mean(0), _XC + np.array(off), _SXY)
     res = sp2.register_full(slab, _XEN, seed, R_cand=R_CAND, k_cz=K, k_xen=K, n_best=N_BEST, max_rounds=3)
-    ncert = 0
-    if len(res["anchors"]) >= 6:
-        M0 = find_affine_transformation_2d(slab[res["anchors"][:, 0]], _XEN[res["anchors"][:, 1]])
-        r = sp2.match(slab, _XEN, lambda p: _aff(M0, p), R_cand=30.0, n_best=N_BEST, anchor_frac=0.8,
-                      k_cz=K, k_xen=K, max_rounds=3)
-        cert = r["accepted"]
-        if len(cert) >= 9:
-            cert = sp2.flow_filter(cert, _aff(M0, slab)[cert[:, 0]], _XEN)
-        ncert = len(cert)
-    return (st, rot, off, len(res["anchors"]), ncert)
+    return (st, rot, off, len(res["anchors"]), len(res["certified"]))
 
 
 def _certify_combo(args):
@@ -103,16 +94,10 @@ def _certify_at(st, rot, off):
     pl_slab = _PL[in_slab]
     seed = make_seed(rot, slab.mean(0), _XC + np.array(off), _SXY)
     res = sp2.register_full(slab, _XEN, seed, R_cand=R_CAND, k_cz=K, k_xen=K, n_best=N_BEST, max_rounds=3)
-    if len(res["anchors"]) < 6:
-        return None
-    M0 = find_affine_transformation_2d(slab[res["anchors"][:, 0]], _XEN[res["anchors"][:, 1]])
-    r = sp2.match(slab, _XEN, lambda p: _aff(M0, p), R_cand=30.0, n_best=N_BEST, anchor_frac=0.8,
-                  k_cz=K, k_xen=K, max_rounds=3)
-    cert = r["accepted"]
-    if len(cert) >= 9:
-        cert = sp2.flow_filter(cert, _aff(M0, slab)[cert[:, 0]], _XEN)
+    cert = res["certified"]
     if len(cert) < 6:
         return None
+    M0 = res["affine"]
     dec = decompose_affine(M0)
     s1, s2 = abs(dec["scale1"]), abs(dec["scale2"])
     scale = float(np.mean([s1, s2]))
@@ -234,14 +219,7 @@ def search_anchor_section(cfg, sec, num_cpus=None, verbose=True):
         slab2, pl2 = new_xy_um[in_slab2], new_pl[in_slab2]
         seed2 = make_seed(best["rot"], slab2.mean(0), xc + np.array(best["off"]), sxy)
         res2 = sp2.register_full(slab2, xen_xy, seed2, R_cand=R_CAND, k_cz=K, k_xen=K, n_best=N_BEST, max_rounds=3)
-        cert2 = np.empty((0, 2), int)
-        if len(res2["anchors"]) >= 6:
-            M0b = find_affine_transformation_2d(slab2[res2["anchors"][:, 0]], xen_xy[res2["anchors"][:, 1]])
-            r2 = sp2.match(slab2, xen_xy, lambda p: _aff(M0b, p), R_cand=30.0, n_best=N_BEST, anchor_frac=0.8,
-                          k_cz=K, k_xen=K, max_rounds=3)
-            cert2 = r2["accepted"]
-            if len(cert2) >= 9:
-                cert2 = sp2.flow_filter(cert2, _aff(M0b, slab2)[cert2[:, 0]], xen_xy)
+        cert2 = res2["certified"]
         n_rounds += 1
         if verbose:
             print(f"[sec{sec}] tilt-refit round {n_rounds}: n_cert {best['n_cert']} -> {len(cert2)}", flush=True)
