@@ -126,6 +126,7 @@ reference implementation (a CodeOcean capsule wrapping this package, with its ow
 
 ```bash
 xenium-autocoreg <config.json> /path/to/out --pose-mode auto
+xenium-autocoreg <config.json> /path/to/out --pose-mode auto --zstack-scale-to-xenium 0.72
 xenium-autocoreg <config.json> /path/to/out --pose-mode center-rotation --center-um 1200.0,1500.0 --rotation-deg 10.0
 xenium-autocoreg <config.json> /path/to/out --pose-mode center-rotation --pose-json seed.json
 ```
@@ -138,9 +139,16 @@ above) -- e.g.:
 ```
 `seed.json` for `center-rotation`:
 ```json
-{"center_um": [1200.0, 1500.0], "rotation_deg": 10.0, "scale": 0.80}
+{"center_um": [1200.0, 1500.0], "rotation_deg": 10.0, "zstack_scale_to_xenium": 0.80}
 ```
-(`"scale"` is optional -- defaults to the subject's own `zstack_scale_to_Xenium` if omitted.)
+`--zstack-scale-to-xenium`/`"zstack_scale_to_xenium"` OPTIONALLY overrides the subject's own
+`SubjectConfig.zstack_scale_to_Xenium` (the z-stack-to-Xenium linear PHYSICAL scale factor, an
+INPUT prior used to seed the search) for this run -- it applies to **every** `--pose-mode` alike
+(auto and center-rotation both ultimately seed from `cfg.zstack_scale_to_Xenium`), not just
+center-rotation. This is *not* the same thing as the per-candidate FITTED affine scale this
+package's own logs/QC report (e.g. a grid-search candidate line's `scale=0.809`) -- that's a
+measured *output* of the registration, not a knob. Blank/omitted = use the subject's own
+configured value.
 
 `--num-cpus N` controls worker-process count for every parallelized stage (the auto pose-grid
 search, the per-section fine-registration tile correlation, cell-centroid extraction, and 3D point
