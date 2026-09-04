@@ -144,7 +144,8 @@ def run_subject(cfg, out_dir, pose_mode="auto", anchor_sec=None, center_um=None,
 
     log(f"[{subject_id}] stage: chain_refine coarse propagation across {len(cfg.sections)} sections")
     chain_dir = out_dir / "_chain_internal"
-    chain_results = run_chain(cfg, anchor_sec, anchor_M, anchor_z, chain_dir, sections=cfg.sections, R_3d=R_3d)
+    chain_results = run_chain(cfg, anchor_sec, anchor_M, anchor_z, chain_dir, sections=cfg.sections,
+                              R_3d=R_3d, num_cpus=num_cpus)
     sections = [r["sec"] for r in chain_results]
     log(f"[{subject_id}] chain covers sections: {sections}")
 

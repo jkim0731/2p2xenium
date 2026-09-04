@@ -30,7 +30,7 @@ def clip_affine_scale(M, lo=SCALE_CLIP[0], hi=SCALE_CLIP[1]):
     return M
 
 
-def refine_section(cfg, sec, M_base, z_base, zstack):
+def refine_section(cfg, sec, M_base, z_base, zstack, num_cpus=None):
     mz = MAX_SHIFT[0]
     if not (mz <= z_base < zstack.shape[0] - mz):
         raise ValueError(f"z_base={z_base} outside the usable z-stack range "
@@ -46,7 +46,7 @@ def refine_section(cfg, sec, M_base, z_base, zstack):
         xen_t = apply_affine_based_on_reference_2d(xenium_img, M, zstack.shape[1:], order=0)
         zyx_xen, zyx_zst, best_corrs, base_corrs = tile_based_warping(
             xen_t, zstack, z_base=z_base, margin=MARGIN, tile_size=TILE_SIZE,
-            overlap=OVERLAP, max_shift=MAX_SHIFT, progress=False)
+            overlap=OVERLAP, max_shift=MAX_SHIFT, num_cpus=num_cpus, progress=False)
         best_corrs = np.nan_to_num(np.array(best_corrs))
         z_base = int(round(zyx_zst[:, 0].mean()))
         corr_threshold = max(float(np.percentile(best_corrs, 75)), 0.3)
@@ -71,7 +71,7 @@ def refine_section(cfg, sec, M_base, z_base, zstack):
     return M, z_base, history
 
 
-def run_chain(cfg, anchor_sec, anchor_M, anchor_z, out_dir, sections=None, R_3d=None):
+def run_chain(cfg, anchor_sec, anchor_M, anchor_z, out_dir, sections=None, R_3d=None, num_cpus=None):
     """Refine the anchor section, then chain forward and backward across `sections` (default: all
     sections known for this subject). Writes section_{N}_affine.npy / _result.json to `out_dir`.
 
@@ -79,7 +79,11 @@ def run_chain(cfg, anchor_sec, anchor_M, anchor_z, out_dir, sections=None, R_3d=
     z-spread, `initial_match.search_anchor_section`'s `find_min_z_spread_rotation`) and held fixed
     for every section, matching the reference (`xenium_automatic_coreg.ipynb` cell 4): the z-stack
     volume is rotated once, not the Xenium section, and every section (anchor + propagated) is
-    refined against that same rotated volume. None/identity reproduces the untilted behavior."""
+    refined against that same rotated volume. None/identity reproduces the untilted behavior.
+
+    `num_cpus`: forwarded to every `refine_section` call's tile correlation (the SAME
+    `ProcessPoolExecutor` this function's per-section, per-iteration tile-based warping spawns --
+    up to `MAX_ITERS` times per section). See `resources.resolve_num_cpus`."""
     out_dir = Path(out_dir); out_dir.mkdir(parents=True, exist_ok=True)
     zstack = tiff.imread(cfg.zstack_registered_tif)
     print(f"[{cfg.subject_id}] z-stack loaded: {zstack.shape}", flush=True)
@@ -98,7 +102,7 @@ def run_chain(cfg, anchor_sec, anchor_M, anchor_z, out_dir, sections=None, R_3d=
         return rec
 
     print(f"\n=== section {anchor_sec} (anchor seed) ===", flush=True)
-    M, z_base, history = refine_section(cfg, anchor_sec, anchor_M, anchor_z, zstack)
+    M, z_base, history = refine_section(cfg, anchor_sec, anchor_M, anchor_z, zstack, num_cpus=num_cpus)
     results = [save(anchor_sec, M, z_base, history, "initial-match seed")]
 
     for step_sign, seq in ((+1, forward), (-1, backward)):
@@ -118,7 +122,8 @@ def run_chain(cfg, anchor_sec, anchor_M, anchor_z, out_dir, sections=None, R_3d=
                         f"{step_per_sec:.1f}/section x {n_gap} section gap)")
             print(f"\n=== section {sec} (seed: {seed_desc}, seed z_base={seed_z:.0f}) ===", flush=True)
             try:
-                M_new, z_new, history = refine_section(cfg, sec, M_cur, int(round(seed_z)), zstack)
+                M_new, z_new, history = refine_section(cfg, sec, M_cur, int(round(seed_z)), zstack,
+                                                        num_cpus=num_cpus)
             except ValueError as e:
                 print(f"  STOPPING this direction: {e}", flush=True)
                 break
