@@ -128,7 +128,6 @@ reference implementation (a CodeOcean capsule wrapping this package, with its ow
 xenium-autocoreg <config.json> /path/to/out --pose-mode auto
 xenium-autocoreg <config.json> /path/to/out --pose-mode center-rotation --center-um 1200.0,1500.0 --rotation-deg 10.0
 xenium-autocoreg <config.json> /path/to/out --pose-mode center-rotation --pose-json seed.json
-xenium-autocoreg <config.json> /path/to/out --pose-mode corners --xenium-trapezoid-corners-um 0,0,2000,50,1980,1800,-20,1750 --top-edge 0   # NOT YET IMPLEMENTED, see "Known limitations"
 ```
 `<config.json>` matches `SubjectConfig`'s own field names (see `config.subject_config_from_json`
 above) -- e.g.:
@@ -148,12 +147,6 @@ search, the per-section fine-registration tile correlation, cell-centroid extrac
 mapping) -- see `resources.resolve_num_cpus`: blank/`0`/`N` greater than this machine's CPU count
 = auto (every available core); `N=1` = serial, no multiprocessing at all (useful for debugging, or
 a resource-constrained environment where spawning many worker processes gets silently killed).
-
-`seed.json` for `corners` (mode 3 -- see "Known limitations", not yet implemented):
-```json
-{"xenium_trapezoid_corners_um": [[0, 0], [2000, 50], [1980, 1800], [-20, 1750]], "top_edge": 0}
-```
-(`"zstack_corners_um"` and `"scale"` are optional -- see `pose_seed.seed_from_corners`'s docstring.)
 
 ## Output structure
 
@@ -265,9 +258,9 @@ doesn't, that's a real regression.
   weak-correlation section can still show shear-driven cell-shape distortion.
 - `auto` pose-seeding can fail outright (see `pose_seed.seed_from_auto_search`'s docstring) if the
   true pose sits outside the searched position window; use `center-rotation` when it does.
-- `corners` pose-seeding is not implemented -- see `pose_seed.seed_from_corners`. Its parameters
-  (`xenium_trapezoid_corners_um`, `top_edge`, `zstack_corners_um`) are already wired through
-  `run_subject`/the CLI/`--pose-json`, so implementing it needs no caller-side changes.
+- A third, corner-based pose-seeding mode is a documented TODO -- see `pose_seed.seed_from_corners`
+  for exactly why it's not implemented, and what real click data is needed before it can be. It is
+  not exposed via `run_subject`/the CLI/`--pose-json` (only `auto` and `center-rotation` are).
 - This package does not resolve `SubjectConfig` from any mounted-asset naming convention itself
   (`config.subject_config_from_json` is a generic "JSON matching the dataclass fields" loader, not
   a data-asset resolver) -- write a resolver in your own pipeline/capsule for that. See

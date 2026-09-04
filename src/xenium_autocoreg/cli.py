@@ -2,7 +2,7 @@
 Unified CLI entry point. Replaces the old `run_subject.py`/`run_full_pipeline.py`/`pipeline.py`
 (now in `archive/`) with one command that wires the validated stage order:
 
-    pose_seed (mode 1/2/3) -> chain_refine.run_chain (all sections) ->
+    pose_seed (mode 1/2) -> chain_refine.run_chain (all sections) ->
     fine_registration.register_section (per section) -> copy_zstack_assets ->
     cell_centroids -> transform_xenium_points -> concatenated total CSV
 
@@ -16,18 +16,17 @@ https://github.com/AllenNeuralDynamics/ophys-xenium-autocoreg for a reference im
 Usage:
     xenium-autocoreg <config.json> <out_dir> --pose-mode auto [--anchor-sec N]
     xenium-autocoreg <config.json> <out_dir> --pose-mode center-rotation --center-um X,Y --rotation-deg R [--scale S]
-    xenium-autocoreg <config.json> <out_dir> --pose-mode corners --xenium-trapezoid-corners-um X1,Y1,X2,Y2,X3,Y3,X4,Y4 --top-edge N   # NOT YET IMPLEMENTED upstream (pose_seed.seed_from_corners) -- parameters are wired through for forward-compatibility
+
+(A third pose-seeding protocol, corner-based, is a documented TODO in `pose_seed.seed_from_corners`
+-- not yet implemented, and not exposed here.)
 
 `<config.json>` matches `SubjectConfig`'s own field names (see `config.subject_config_from_json`):
     {"subject_id": 816462, "aligned_dir": "...", "zstack_registered_tif": "...",
      "zstack_segmented_tif": "...", "zstack_xy_um": 1.367, "reporter_zarr_root": "..."}
 
-`--pose-json PATH` is an alternative to inline flags for mode 2/3, pointing at a JSON file:
-    {"center_um": [x, y], "rotation_deg": r, "scale": s}   (mode 2; "scale" optional --
-    defaults to the subject's own SubjectConfig.zstack_scale_to_Xenium if omitted)
-    {"xenium_trapezoid_corners_um": [[x,y],[x,y],[x,y],[x,y]], "top_edge": 0,
-     "zstack_corners_um": [[x,y],[x,y],[x,y],[x,y]], "scale": s}   (mode 3, NOT YET IMPLEMENTED --
-    "zstack_corners_um" and "scale" optional)
+`--pose-json PATH` is an alternative to inline flags for mode 2, pointing at a JSON file:
+    {"center_um": [x, y], "rotation_deg": r, "scale": s}   ("scale" optional -- defaults to the
+    subject's own SubjectConfig.zstack_scale_to_Xenium if omitted)
 
 `--num-cpus N` controls worker-process count for every parallelized stage (see
 `resources.resolve_num_cpus`): blank/0/N > this machine's CPU count -> auto (every available
@@ -81,21 +80,15 @@ def write_cell_centroids(cfg, out_dir, sections, num_cpus=None):
 
 
 def run_subject(cfg, out_dir, pose_mode="auto", anchor_sec=None, center_um=None,
-                rotation_deg=None, scale=None, xenium_trapezoid_corners_um=None, top_edge=None,
-                zstack_corners_um=None, num_cpus=None, verbose=True):
+                rotation_deg=None, scale=None, num_cpus=None, verbose=True):
     """Run the full pipeline for one subject, given its `SubjectConfig` (`cfg`) -- see the module
     docstring for how to obtain one (directly, or via `config.subject_config_from_json`).
 
-    `pose_mode` selects which of the 3 pose-seeding protocols seeds the anchor section's initial
-    pose (see `pose_seed`'s module docstring for the algorithm):
+    `pose_mode` selects which pose-seeding protocol seeds the anchor section's initial pose (see
+    `pose_seed`'s module docstring for the algorithm):
         "auto"            -- fully automatic; only `anchor_sec` is relevant (optional -- blank
                              auto-selects via `anchor.select_anchor_section`).
         "center-rotation" -- needs `center_um` + `rotation_deg` (`scale` optional).
-        "corners"         -- needs `xenium_trapezoid_corners_um` + `top_edge` (`zstack_corners_um`
-                             + `scale` optional). NOT YET IMPLEMENTED upstream
-                             (`pose_seed.seed_from_corners` raises `NotImplementedError`) -- these
-                             parameters are wired through now so no caller changes will be needed
-                             once it is.
 
     `num_cpus`: worker-process count for every parallelized stage (the auto pose-grid search, the
     per-section fine-registration tile correlation, cell-centroid extraction, and 3D point
@@ -117,13 +110,6 @@ def run_subject(cfg, out_dir, pose_mode="auto", anchor_sec=None, center_um=None,
     elif pose_mode == "center-rotation":
         seed = ps.seed_from_center_rotation(center_um, rotation_deg, scale, cfg=cfg)
         seed_result = ps.refine_from_seed(cfg, anchor_sec, seed, verbose=verbose)
-    elif pose_mode == "corners":
-        # NOT YET IMPLEMENTED upstream -- see pose_seed.seed_from_corners's docstring. Parameters
-        # are validated + passed through here so this call site needs no changes once it is
-        # implemented (expected to return the same dict(M3, R_3d, plane, ...) shape as the other
-        # two modes, since that's what's unpacked immediately below).
-        seed_result = ps.seed_from_corners(xenium_trapezoid_corners_um, top_edge,
-                                           zstack_corners_um=zstack_corners_um, scale=scale)
     else:
         raise ValueError(f"unknown pose_mode {pose_mode!r}")
 
@@ -181,7 +167,7 @@ def _parse_points(s, n):
     return [(vals[i], vals[i + 1]) for i in range(0, 2 * n, 2)]
 
 
-_COORD_FLAGS = ("--center-um", "--xenium-trapezoid-corners-um", "--zstack-corners-um")
+_COORD_FLAGS = ("--center-um",)
 
 
 def _fix_negative_coord_tokens(argv):
@@ -208,20 +194,13 @@ def main(argv=None):
     p = argparse.ArgumentParser(prog="xenium-autocoreg")
     p.add_argument("config", help="path to a SubjectConfig JSON file (see config.subject_config_from_json)")
     p.add_argument("out_dir")
-    p.add_argument("--pose-mode", choices=["auto", "center-rotation", "corners"], default="auto")
+    p.add_argument("--pose-mode", choices=["auto", "center-rotation"], default="auto")
     p.add_argument("--anchor-sec", type=int, default=None)
     p.add_argument("--center-um", default=None, help="X,Y (comma-separated) for --pose-mode center-rotation")
     p.add_argument("--rotation-deg", type=float, default=None)
     p.add_argument("--scale", type=float, default=None,
-                  help="z-stack-to-Xenium scale factor (center-rotation or corners); defaults to "
-                       "the subject's own config value if omitted")
-    p.add_argument("--xenium-trapezoid-corners-um", default=None,
-                  help="X1,Y1,X2,Y2,X3,Y3,X4,Y4 (comma-separated, 4 x,y pairs) for --pose-mode corners")
-    p.add_argument("--top-edge", type=int, default=None,
-                  help="which corner/edge (0-3) is the trapezoid's short/slanted top, for --pose-mode corners")
-    p.add_argument("--zstack-corners-um", default=None,
-                  help="X1,Y1,X2,Y2,X3,Y3,X4,Y4 (comma-separated, 4 x,y pairs), OPTIONAL for "
-                       "--pose-mode corners; defaults to the z-stack's own canonical FOV rectangle")
+                  help="z-stack-to-Xenium scale factor (center-rotation); defaults to the "
+                       "subject's own config value if omitted")
     p.add_argument("--pose-json", default=None, help="JSON file alternative to the inline flags above")
     p.add_argument("--num-cpus", type=int, default=None,
                   help="worker-process count for every parallelized stage. Blank/0/a value "
@@ -231,28 +210,17 @@ def main(argv=None):
 
     center_um = _parse_points(args.center_um, 1)[0] if args.center_um else None
     rotation_deg, scale = args.rotation_deg, args.scale
-    xenium_trapezoid_corners_um = (_parse_points(args.xenium_trapezoid_corners_um, 4)
-                                   if args.xenium_trapezoid_corners_um else None)
-    top_edge = args.top_edge
-    zstack_corners_um = (_parse_points(args.zstack_corners_um, 4)
-                        if args.zstack_corners_um else None)
 
     if args.pose_json:
         data = json.load(open(args.pose_json))
         center_um = tuple(data["center_um"]) if "center_um" in data else center_um
         rotation_deg = data.get("rotation_deg", rotation_deg)
         scale = data.get("scale", scale)
-        if "xenium_trapezoid_corners_um" in data:
-            xenium_trapezoid_corners_um = [tuple(pt) for pt in data["xenium_trapezoid_corners_um"]]
-        top_edge = data.get("top_edge", top_edge)
-        if "zstack_corners_um" in data:
-            zstack_corners_um = [tuple(pt) for pt in data["zstack_corners_um"]]
 
     cfg = subject_config_from_json(args.config)
     run_subject(cfg, args.out_dir, pose_mode=args.pose_mode, anchor_sec=args.anchor_sec,
                center_um=center_um, rotation_deg=rotation_deg, scale=scale,
-               xenium_trapezoid_corners_um=xenium_trapezoid_corners_um, top_edge=top_edge,
-               zstack_corners_um=zstack_corners_um, num_cpus=args.num_cpus)
+               num_cpus=args.num_cpus)
 
 
 if __name__ == "__main__":
