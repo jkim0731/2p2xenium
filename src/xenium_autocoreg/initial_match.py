@@ -5,8 +5,8 @@ rotation range + a minimum match rate) to reject spurious peaks.
 """
 import numpy as np
 import tifffile as tiff
-from concurrent.futures import ProcessPoolExecutor
 from . import somaprint as sp2, bigwarp
+from .resources import pool_map
 from .geometry import find_affine_transformation_2d, decompose_affine
 from .populations import load_zstack_cells, load_xenium_cells
 from .reference_ported import find_min_z_spread_rotation
@@ -141,10 +141,11 @@ def _certify_at(st, rot, off):
                n_xen_fov=n_xen_fov, n_cz_slab=n_cz_slab, match_rate=round(match_rate, 4))
 
 
-def search_anchor_section(cfg, sec, max_workers=14, verbose=True):
+def search_anchor_section(cfg, sec, num_cpus=None, verbose=True):
     """Full GT-free grid search at Xenium section `sec`. Returns a dict with the winning candidate
     (moving z-stack points, fixed ALIGNED-frame Xenium points, plane, affine) or None if nothing
-    plausible was found."""
+    plausible was found. `num_cpus`: see `resources.resolve_num_cpus` (None/0/over-available ->
+    auto; 1 -> serial, no multiprocessing)."""
     ids_cz_all, cz_all_xy, cz_all_pl = load_zstack_cells(cfg)
     ids_x, xen_xy, used_reporter, n_total = load_xenium_cells(cfg, sec, aligned=True, min_count=REPORTER_MIN)
     xc = xen_xy.mean(0)
@@ -157,8 +158,7 @@ def search_anchor_section(cfg, sec, max_workers=14, verbose=True):
     pool_args = (cz_all_xy, cz_all_pl, ids_cz_all, xen_xy, xc, fov_um, sxy)
 
     combos = [(st, rot, off) for st in PLANES for rot in ROTS for off in SEED_OFFSETS]
-    with ProcessPoolExecutor(max_workers=max_workers, initializer=_pool_init, initargs=pool_args) as ex:
-        out = list(ex.map(_rank_combo, combos, chunksize=8))
+    out = pool_map(_rank_combo, combos, num_cpus, initializer=_pool_init, initargs=pool_args, chunksize=8)
     out.sort(key=lambda r: -r[4])
     if verbose:
         print(f"[sec{sec}] top-5 raw: " + ", ".join(f"(st={o[0]},rot={o[1]},off={o[2]},cert={o[4]})"
@@ -167,8 +167,7 @@ def search_anchor_section(cfg, sec, max_workers=14, verbose=True):
     to_certify = [(st, rot, off) for st, rot, off, n_anc, n_cert in out[:N_CANDIDATES] if n_cert >= 6]
     if verbose:
         print(f"[sec{sec}] certifying top {len(to_certify)} candidates in parallel...", flush=True)
-    with ProcessPoolExecutor(max_workers=max_workers, initializer=_pool_init, initargs=pool_args) as ex:
-        certified = list(ex.map(_certify_combo, to_certify, chunksize=4))
+    certified = pool_map(_certify_combo, to_certify, num_cpus, initializer=_pool_init, initargs=pool_args, chunksize=4)
     candidates = []
     for (st, rot, off), c in zip(to_certify, certified):
         if c is not None:

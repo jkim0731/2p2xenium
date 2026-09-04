@@ -2,39 +2,65 @@
 Unified CLI entry point. Replaces the old `run_subject.py`/`run_full_pipeline.py`/`pipeline.py`
 (now in `archive/`) with one command that wires the validated stage order:
 
-    pose_seed (mode 1/2/3) -> chain_refine.run_chain (all sections) ->
+    pose_seed (mode 1/2) -> chain_refine.run_chain (all sections) ->
     fine_registration.register_section (per section) -> copy_zstack_assets ->
     cell_centroids -> transform_xenium_points -> concatenated total CSV
 
-Usage:
-    xenium-autocoreg <subject_id> <out_dir> --pose-mode auto
-    xenium-autocoreg <subject_id> <out_dir> --pose-mode center-rotation --center-um X,Y --rotation-deg R [--anchor-sec N]
-    xenium-autocoreg <subject_id> <out_dir> --pose-mode corners --pose-json seed.json   # NOT YET IMPLEMENTED
+This module is data-layout-agnostic: `run_subject` takes a `SubjectConfig` directly (built by hand,
+or loaded from a plain JSON file via `config.subject_config_from_json`) -- it does not resolve
+anything from a mounted-asset naming convention itself. For a specific lab's asset layout (e.g. a
+CodeOcean capsule), write your own resolver that builds a `SubjectConfig` and either call
+`run_subject(cfg, ...)` directly from Python, or write it out as a JSON file for this CLI -- see
+https://github.com/AllenNeuralDynamics/ophys-xenium-autocoreg for a reference implementation.
 
-`--pose-json PATH` is an alternative to inline flags for mode 2/3, pointing at a JSON file:
-    {"center_um": [x, y], "rotation_deg": r, "scale": 0.8}   (mode 2; "scale" optional --
-    defaults to the subject's own SubjectConfig.zstack_scale_to_Xenium if omitted)
-    {"xenium_trapezoid_corners_um": [[x,y],[x,y],[x,y],[x,y]], "top_edge": 0}      (mode 3, TODO)
+Usage:
+    xenium-autocoreg <config.json> <out_dir> --pose-mode auto [--anchor-sec N] [--zstack-scale-to-xenium S]
+    xenium-autocoreg <config.json> <out_dir> --pose-mode center-rotation --center-um X,Y --rotation-deg R [--zstack-scale-to-xenium S]
+
+(A third pose-seeding protocol, corner-based, is a documented TODO in `pose_seed.seed_from_corners`
+-- not yet implemented, and not exposed here.)
+
+`<config.json>` matches `SubjectConfig`'s own field names (see `config.subject_config_from_json`):
+    {"subject_id": 816462, "aligned_dir": "...", "zstack_registered_tif": "...",
+     "zstack_segmented_tif": "...", "zstack_xy_um": 1.367, "reporter_zarr_root": "..."}
+
+`--zstack-scale-to-xenium S` OPTIONALLY overrides the subject's own
+`SubjectConfig.zstack_scale_to_Xenium` (the z-stack-to-Xenium linear PHYSICAL scale factor used to
+seed the initial pose search) for this run -- applies to EVERY `--pose-mode` alike (auto and
+center-rotation both ultimately seed from `cfg.zstack_scale_to_Xenium`), not just center-rotation.
+This is an INPUT prior, not the same thing as the per-candidate FITTED affine scale reported in
+this package's own logs/QC (e.g. the `scale=0.809` in a grid-search candidate line) -- that's a
+measured OUTPUT of the registration, not a knob.
+
+`--pose-json PATH` is an alternative to inline flags for mode 2, pointing at a JSON file:
+    {"center_um": [x, y], "rotation_deg": r, "zstack_scale_to_xenium": s}   ("zstack_scale_to_xenium"
+    optional -- defaults to the subject's own SubjectConfig.zstack_scale_to_Xenium if omitted)
+
+`--num-cpus N` controls worker-process count for every parallelized stage (see
+`resources.resolve_num_cpus`): blank/0/N > this machine's CPU count -> auto (every available
+core); N=1 -> serial, no multiprocessing at all (useful for debugging, or a resource-constrained
+sandbox where spawning many worker processes gets silently killed).
 """
 from __future__ import annotations
 import argparse
 import json
 import sys
+from dataclasses import replace
 from pathlib import Path
-from concurrent.futures import ProcessPoolExecutor
 
 import numpy as np
 import pandas as pd
 import tifffile as tiff
 from skimage.measure import regionprops_table
 
-from .config import resolve_subject
+from .config import subject_config_from_json
 from .anchor import select_anchor_section
 from .chain_refine import run_chain
 from .fine_registration import register_section
 from .copy_zstack_assets import copy_zstack_assets
 from .transform_xenium_points import run_transform_xenium_points
 from .reference_ported import rotate_volume
+from .resources import pool_map
 from . import pose_seed as ps
 
 
@@ -57,31 +83,55 @@ def _centroids_one(args):
             cdir / f"section_{sec}_ophys_centroids.csv", index=False)
 
 
-def write_cell_centroids(cfg, out_dir, sections, max_workers=14):
+def write_cell_centroids(cfg, out_dir, sections, num_cpus=None):
     (Path(out_dir) / "cell_centroids").mkdir(parents=True, exist_ok=True)
-    with ProcessPoolExecutor(max_workers=max_workers) as ex:
-        list(ex.map(_centroids_one, [(cfg, out_dir, s) for s in sections]))
+    pool_map(_centroids_one, [(cfg, out_dir, s) for s in sections], num_cpus)
 
 
-def run_subject(subject_id, out_dir, pose_mode="auto", anchor_sec=None, center_um=None,
-                rotation_deg=None, scale=None, verbose=True):
+def run_subject(cfg, out_dir, pose_mode="auto", anchor_sec=None, center_um=None,
+                rotation_deg=None, zstack_scale_to_xenium=None, num_cpus=None, verbose=True):
+    """Run the full pipeline for one subject, given its `SubjectConfig` (`cfg`) -- see the module
+    docstring for how to obtain one (directly, or via `config.subject_config_from_json`).
+
+    `pose_mode` selects which pose-seeding protocol seeds the anchor section's initial pose (see
+    `pose_seed`'s module docstring for the algorithm):
+        "auto"            -- fully automatic; only `anchor_sec` is relevant (optional -- blank
+                             auto-selects via `anchor.select_anchor_section`).
+        "center-rotation" -- needs `center_um` + `rotation_deg`.
+
+    `zstack_scale_to_xenium`: OPTIONAL override of `cfg.zstack_scale_to_Xenium` (the z-stack-to-
+    Xenium linear PHYSICAL scale factor used to seed the initial pose search) for this run only --
+    applied once, up front, so it takes effect for EVERY `pose_mode` alike (both
+    `pose_seed.seed_from_auto_search`/`search_anchor_section` and `pose_seed.seed_from_center_rotation`
+    read `cfg.zstack_scale_to_Xenium` as their seed scale). This is an INPUT prior, not the same
+    thing as the per-candidate FITTED affine scale reported in this package's own logs/QC (a
+    measured output of the registration, not a knob). None (default) = use the subject's own
+    configured value unchanged.
+
+    `num_cpus`: worker-process count for every parallelized stage (the auto pose-grid search, the
+    per-section fine-registration tile correlation, cell-centroid extraction, and 3D point
+    mapping). See `resources.resolve_num_cpus`: None/0/a value exceeding this machine's CPU count
+    -> auto (every available core); 1 -> serial, no multiprocessing at all.
+    """
     def log(msg):
         if verbose:
             print(msg, flush=True)
 
-    cfg = resolve_subject(subject_id)
+    if zstack_scale_to_xenium is not None:
+        cfg = replace(cfg, zstack_scale_to_Xenium=zstack_scale_to_xenium)
+
+    subject_id = cfg.subject_id
     out_dir = Path(out_dir); out_dir.mkdir(parents=True, exist_ok=True)
     if anchor_sec is None:
         anchor_sec, _ = select_anchor_section(cfg, verbose=verbose)
 
-    log(f"[{subject_id}] pose-seed mode={pose_mode}, anchor section={anchor_sec}")
+    log(f"[{subject_id}] pose-seed mode={pose_mode}, anchor section={anchor_sec}, "
+        f"zstack_scale_to_Xenium={cfg.zstack_scale_to_Xenium}")
     if pose_mode == "auto":
-        seed_result = ps.seed_from_auto_search(cfg, anchor_sec, verbose=verbose)
+        seed_result = ps.seed_from_auto_search(cfg, anchor_sec, num_cpus=num_cpus, verbose=verbose)
     elif pose_mode == "center-rotation":
-        seed = ps.seed_from_center_rotation(center_um, rotation_deg, scale, cfg=cfg)
+        seed = ps.seed_from_center_rotation(center_um, rotation_deg, cfg=cfg)
         seed_result = ps.refine_from_seed(cfg, anchor_sec, seed, verbose=verbose)
-    elif pose_mode == "corners":
-        raise NotImplementedError("pose-mode 'corners' is not yet implemented -- see pose_seed.seed_from_corners")
     else:
         raise ValueError(f"unknown pose_mode {pose_mode!r}")
 
@@ -94,7 +144,8 @@ def run_subject(subject_id, out_dir, pose_mode="auto", anchor_sec=None, center_u
 
     log(f"[{subject_id}] stage: chain_refine coarse propagation across {len(cfg.sections)} sections")
     chain_dir = out_dir / "_chain_internal"
-    chain_results = run_chain(cfg, anchor_sec, anchor_M, anchor_z, chain_dir, sections=cfg.sections, R_3d=R_3d)
+    chain_results = run_chain(cfg, anchor_sec, anchor_M, anchor_z, chain_dir, sections=cfg.sections,
+                              R_3d=R_3d, num_cpus=num_cpus)
     sections = [r["sec"] for r in chain_results]
     log(f"[{subject_id}] chain covers sections: {sections}")
 
@@ -111,7 +162,8 @@ def run_subject(subject_id, out_dir, pose_mode="auto", anchor_sec=None, center_u
     for rec in chain_results:
         sec = rec["sec"]
         M = np.load(chain_dir / f"section_{sec}_affine.npy")
-        summary.append(register_section(cfg, sec, M, rec["z_base"], R_3d, zstack_r, zstack_masks_r, out_dir))
+        summary.append(register_section(cfg, sec, M, rec["z_base"], R_3d, zstack_r, zstack_masks_r,
+                                        out_dir, num_cpus=num_cpus))
     json.dump(summary, open(out_dir / "propagation_summary.json", "w"), indent=2)
 
     log(f"[{subject_id}] stage: concatenated cell_matching_probability totals")
@@ -121,39 +173,82 @@ def run_subject(subject_id, out_dir, pose_mode="auto", anchor_sec=None, center_u
         cmp_dir / f"mouse_{subject_id}_total_matching_results.csv", index=False)
 
     log(f"[{subject_id}] stage: cell_centroids")
-    write_cell_centroids(cfg, out_dir, sections)
+    write_cell_centroids(cfg, out_dir, sections, num_cpus=num_cpus)
 
     log(f"[{subject_id}] stage: transform_xenium_points")
-    run_transform_xenium_points(cfg, out_dir, sections)
+    run_transform_xenium_points(cfg, out_dir, sections, num_cpus=num_cpus)
 
     log(f"[{subject_id}] DONE -> {out_dir}")
     return summary
 
 
+def _parse_points(s, n):
+    """Parse a flat comma-separated string of `2*n` floats into a list of `n` (x, y) tuples."""
+    vals = [float(v) for v in s.split(",")]
+    if len(vals) != 2 * n:
+        raise ValueError(f"expected {2 * n} comma-separated numbers ({n} x,y pairs), got {len(vals)}")
+    return [(vals[i], vals[i + 1]) for i in range(0, 2 * n, 2)]
+
+
+_COORD_FLAGS = ("--center-um",)
+
+
+def _fix_negative_coord_tokens(argv):
+    """Rewrite `--flag value` to `--flag=value` for the comma-joined coordinate flags, so a value
+    starting with a minus sign (e.g. `-50,-100`) isn't misparsed by argparse as a new option --
+    argparse's own negative-number heuristic only recognizes a bare `-123`/`-1.5`, not a
+    comma-separated list, so `--center-um -50,-100` would otherwise fail with 'expected one
+    argument' before this module's own validation ever runs."""
+    out = []
+    i = 0
+    while i < len(argv):
+        tok = argv[i]
+        if tok in _COORD_FLAGS and i + 1 < len(argv):
+            out.append(f"{tok}={argv[i + 1]}")
+            i += 2
+        else:
+            out.append(tok)
+            i += 1
+    return out
+
+
 def main(argv=None):
+    argv = _fix_negative_coord_tokens(sys.argv[1:] if argv is None else argv)
     p = argparse.ArgumentParser(prog="xenium-autocoreg")
-    p.add_argument("subject_id", type=int)
+    p.add_argument("config", help="path to a SubjectConfig JSON file (see config.subject_config_from_json)")
     p.add_argument("out_dir")
-    p.add_argument("--pose-mode", choices=["auto", "center-rotation", "corners"], default="auto")
+    p.add_argument("--pose-mode", choices=["auto", "center-rotation"], default="auto")
     p.add_argument("--anchor-sec", type=int, default=None)
     p.add_argument("--center-um", default=None, help="X,Y (comma-separated) for --pose-mode center-rotation")
     p.add_argument("--rotation-deg", type=float, default=None)
-    p.add_argument("--scale", type=float, default=None,
-                  help="z-stack-to-Xenium scale factor; defaults to the subject's own config value if omitted")
+    p.add_argument("--zstack-scale-to-xenium", type=float, default=None,
+                  help="OPTIONAL override of the subject's own SubjectConfig.zstack_scale_to_Xenium "
+                       "-- the z-stack-to-Xenium linear PHYSICAL scale factor used to seed the "
+                       "initial pose search. Applies to EVERY --pose-mode alike (not just "
+                       "center-rotation). NOT the same as the fitted affine scale reported in "
+                       "this package's own logs/QC (that's a measured output, not an input). "
+                       "Blank (default) = use the subject's own configured value.")
     p.add_argument("--pose-json", default=None, help="JSON file alternative to the inline flags above")
+    p.add_argument("--num-cpus", type=int, default=None,
+                  help="worker-process count for every parallelized stage. Blank/0/a value "
+                       "exceeding this machine's CPU count = auto (every available core); "
+                       "1 = serial, no multiprocessing at all. See resources.resolve_num_cpus.")
     args = p.parse_args(argv)
 
-    center_um, rotation_deg, scale = None, args.rotation_deg, args.scale
-    if args.center_um:
-        center_um = tuple(float(v) for v in args.center_um.split(","))
+    center_um = _parse_points(args.center_um, 1)[0] if args.center_um else None
+    rotation_deg = args.rotation_deg
+    zstack_scale_to_xenium = args.zstack_scale_to_xenium
+
     if args.pose_json:
-        data = json.load(open(args.pose_json))
+        data = json.loads(Path(args.pose_json).read_text())
         center_um = tuple(data["center_um"]) if "center_um" in data else center_um
         rotation_deg = data.get("rotation_deg", rotation_deg)
-        scale = data.get("scale", scale)
+        zstack_scale_to_xenium = data.get("zstack_scale_to_xenium", zstack_scale_to_xenium)
 
-    run_subject(args.subject_id, args.out_dir, pose_mode=args.pose_mode, anchor_sec=args.anchor_sec,
-               center_um=center_um, rotation_deg=rotation_deg, scale=scale)
+    cfg = subject_config_from_json(args.config)
+    run_subject(cfg, args.out_dir, pose_mode=args.pose_mode, anchor_sec=args.anchor_sec,
+               center_um=center_um, rotation_deg=rotation_deg,
+               zstack_scale_to_xenium=zstack_scale_to_xenium, num_cpus=args.num_cpus)
 
 
 if __name__ == "__main__":
