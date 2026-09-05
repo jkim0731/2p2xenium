@@ -152,9 +152,17 @@ configured value.
 
 `--num-cpus N` controls worker-process count for every parallelized stage (the auto pose-grid
 search, the per-section fine-registration tile correlation, cell-centroid extraction, and 3D point
-mapping) -- see `resources.resolve_num_cpus`: blank/`0`/`N` greater than this machine's CPU count
-= auto (every available core); `N=1` = serial, no multiprocessing at all (useful for debugging, or
-a resource-constrained environment where spawning many worker processes gets silently killed).
+mapping) -- see `resources.resolve_num_cpus`: blank/`0`/`N` at or above this machine's usable CPU
+count = auto (every usable core); `N=1` = serial, no multiprocessing at all (useful for debugging,
+or a resource-constrained environment where spawning too many worker processes gets a run silently
+killed).
+
+`--reserve-cpus N` (default `0`) withholds `N` cores from "usable" for every one of those same
+stages -- `0` (default) means every physical core is usable (matching `--num-cpus`'s own "auto =
+every available core" wording above); set it `> 0` in a shared/orchestrated environment where
+saturating every physical core with worker processes starves the host/orchestration process itself
+(e.g. a Code Ocean computation) -- this is a milder alternative to `--num-cpus 1` (fully serial)
+when only a small buffer, not a full stop to parallelism, is needed.
 
 ## Output structure
 

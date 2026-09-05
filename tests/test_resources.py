@@ -1,10 +1,14 @@
 import os
 import pytest
-from xenium_autocoreg.resources import resolve_num_cpus, pool_map
+from xenium_autocoreg.resources import resolve_num_cpus, pool_map, DEFAULT_RESERVE_CPUS
 
 
 def _available():
     return os.cpu_count() or 1
+
+
+def test_default_reserve_is_zero():
+    assert DEFAULT_RESERVE_CPUS == 0
 
 
 def test_resolve_num_cpus_none_is_auto():
@@ -33,6 +37,39 @@ def test_resolve_num_cpus_negative_raises():
         resolve_num_cpus(-1)
 
 
+def _usable(reserve):
+    return max(1, _available() - reserve)
+
+
+def test_reserve_cpus_buffers_auto():
+    # With an explicit reserve_cpus, "auto" (None/0) withholds that many cores instead of using
+    # every physical core.
+    reserve = 1
+    expected = _usable(reserve)
+    assert resolve_num_cpus(None, reserve_cpus=reserve) == (None if expected == 1 else expected)
+    assert resolve_num_cpus(0, reserve_cpus=reserve) == resolve_num_cpus(None, reserve_cpus=reserve)
+
+
+def test_reserve_cpus_caps_a_request_at_the_full_physical_count():
+    # Asking for literally every physical core, with a reserve set, must still leave the buffer --
+    # this is the whole point of reserve_cpus, not just an >available edge case.
+    reserve = 1
+    if _available() > _usable(reserve):
+        assert resolve_num_cpus(_available(), reserve_cpus=reserve) == resolve_num_cpus(
+            None, reserve_cpus=reserve)
+
+
+def test_reserve_cpus_does_not_reduce_a_request_already_below_the_buffered_ceiling():
+    reserve = 1
+    if _usable(reserve) >= 2:
+        assert resolve_num_cpus(2, reserve_cpus=reserve) == 2
+
+
+def test_reserve_cpus_negative_raises():
+    with pytest.raises(ValueError):
+        resolve_num_cpus(4, reserve_cpus=-1)
+
+
 def _square(x):
     return x * x
 
@@ -43,6 +80,11 @@ def test_pool_map_serial_matches_parallel_order_and_values():
     parallel = pool_map(_square, items, None)  # auto -- may or may not actually parallelize
     assert serial == [x * x for x in items]
     assert serial == parallel
+
+
+def test_pool_map_accepts_reserve_cpus():
+    items = list(range(10))
+    assert pool_map(_square, items, None, reserve_cpus=1) == [x * x for x in items]
 
 
 _OFFSET = None
